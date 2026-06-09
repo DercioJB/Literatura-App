@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS public.workspaces (
 -- Inserir o primeiro workspace padrão se ele não existir
 INSERT INTO public.workspaces (id, owner_id, access_list, locations, low_stock_threshold)
 VALUES ('global_workspace', 'default_admin', '[]'::jsonb, '["MANANGA PT", "CHOTA PT"]'::jsonb, 10)
-ON CONFLIT (id) DO NOTHING;
+ON CONFLICT (id) DO NOTHING;
 
 -- 2. Tabela de Livros (Estoque)
 CREATE TABLE IF NOT EXISTS public.books (
@@ -82,3 +82,83 @@ ALTER PUBLICATION supabase_realtime ADD TABLE public.workspaces;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.books;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.history;
 ALTER PUBLICATION supabase_realtime ADD TABLE public.backups;
+
+-- ==========================================================
+-- DEFINE ROW LEVEL SECURITY (RLS) POLICIES
+-- ==========================================================
+
+-- 1. Enable RLS on all tables
+ALTER TABLE public.workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.books ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.backups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+-- 2. Drop existing policies to prevent conflicts if reapplying
+DROP POLICY IF EXISTS "Permitir leitura de workspaces a utilizadores autenticados" ON public.workspaces;
+DROP POLICY IF EXISTS "Permitir escrita de workspaces a utilizadores autenticados" ON public.workspaces;
+DROP POLICY IF EXISTS "Permitir tudo em books a utilizadores autenticados" ON public.books;
+DROP POLICY IF EXISTS "Permitir tudo em history a utilizadores autenticados" ON public.history;
+DROP POLICY IF EXISTS "Permitir tudo em backups a utilizadores autenticados" ON public.backups;
+DROP POLICY IF EXISTS "Permitir leitura de profiles aos utilizadores" ON public.profiles;
+DROP POLICY IF EXISTS "Permitir inserção do próprio perfil" ON public.profiles;
+DROP POLICY IF EXISTS "Permitir atualização do próprio perfil" ON public.profiles;
+
+-- 3. WORKSPACES POLICIES
+CREATE POLICY "Permitir leitura de workspaces a utilizadores autenticados"
+ON public.workspaces
+FOR SELECT
+TO authenticated
+USING (true);
+
+CREATE POLICY "Permitir escrita de workspaces a utilizadores autenticados"
+ON public.workspaces
+FOR ALL
+TO authenticated
+USING (true)
+WITH CHECK (true);
+
+-- 4. BOOKS POLICIES (Allow authenticated users to CRUD books)
+CREATE POLICY "Permitir tudo em books a utilizadores autenticados"
+ON public.books
+FOR ALL
+TO authenticated
+USING (true)
+WITH CHECK (true);
+
+-- 5. HISTORY POLICIES (Allow authenticated users to CRUD history)
+CREATE POLICY "Permitir tudo em history a utilizadores autenticados"
+ON public.history
+FOR ALL
+TO authenticated
+USING (true)
+WITH CHECK (true);
+
+-- 6. BACKUPS POLICIES (Allow authenticated users to CRUD backups)
+CREATE POLICY "Permitir tudo em backups a utilizadores autenticados"
+ON public.backups
+FOR ALL
+TO authenticated
+USING (true)
+WITH CHECK (true);
+
+-- 7. PROFILES POLICIES (Allow authenticated users to read, but only self can write)
+CREATE POLICY "Permitir leitura de profiles aos utilizadores"
+ON public.profiles
+FOR SELECT
+TO authenticated
+USING (true);
+
+CREATE POLICY "Permitir inserção do próprio perfil"
+ON public.profiles
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid() = id);
+
+CREATE POLICY "Permitir atualização do próprio perfil"
+ON public.profiles
+FOR UPDATE
+TO authenticated
+USING (auth.uid() = id)
+WITH CHECK (auth.uid() = id);
+

@@ -333,7 +333,7 @@ export default function App() {
     setShowConfirmCloudBackup(false);
     setIsCloudBackupRunning(true);
     setCloudBackupProgress(5);
-    setCloudBackupStatusText("Iniciando a ligação segura com o Firestore...");
+    setCloudBackupStatusText("Iniciando a ligação segura com o Supabase PostgreSQL...");
 
     try {
       await new Promise(resolve => setTimeout(resolve, 600));
@@ -360,7 +360,7 @@ export default function App() {
       const nowObj = new Date();
       const todayStr = DateUtils.getISODate(nowObj);
       const timeStr = nowObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const newLog = `Backup manual para o Firestore realizado com sucesso em ${DateUtils.formatDate(nowObj)} às ${timeStr}`;
+      const newLog = `Backup manual para o Supabase PostgreSQL realizado com sucesso em ${DateUtils.formatDate(nowObj)} às ${timeStr}`;
       
       setCloudBackupLogs(prev => [newLog, ...prev].slice(0, 50));
       localStorage.setItem('lit2026_lastCloudBackup', todayStr);
@@ -467,7 +467,7 @@ export default function App() {
           await saveBackupToCloud(backupPayload);
           
           const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          const newLog = `Backup automático para o Firestore realizado com sucesso em ${DateUtils.formatDate(now)} às ${timeStr}`;
+          const newLog = `Backup automático para o Supabase PostgreSQL realizado com sucesso em ${DateUtils.formatDate(now)} às ${timeStr}`;
           
           setCloudBackupLogs(prev => [newLog, ...prev].slice(0, 50));
 
@@ -1105,7 +1105,7 @@ export default function App() {
       try {
         const payload = JSON.parse(e.target?.result as string);
         if (payload.books && Array.isArray(payload.books)) {
-          if (window.confirm(`Importar ${payload.books.length} livros? Os novos dados serão integrados e guardados na Cloud (Firebase).`)) {
+          if (window.confirm(`Importar ${payload.books.length} livros? Os novos dados serão integrados e guardados na Cloud (Supabase).`)) {
             setIsImportRunning(true);
             setImportProgress(0);
             setImportStatusText("A ler o ficheiro e a preparar migração...");
@@ -1119,7 +1119,7 @@ export default function App() {
                   setImportStatusText(statusText);
                 }
               );
-              showToast('Backup enviado para Cloud (Firebase) com sucesso');
+              showToast('Backup enviado para Cloud (Supabase) com sucesso');
             } catch (syncErr: any) {
               console.error("Migration error:", syncErr);
               showToast(`Erro na integração: ${syncErr.message || syncErr}`);
@@ -1935,7 +1935,7 @@ export default function App() {
                     Cópias de Segurança
                   </h3>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    Proteja as suas informações mantendo salvaguardas automatizadas e integradas diretamente no Firestore.
+                    Proteja as suas informações mantendo salvaguardas automatizadas e integradas diretamente no Supabase PostgreSQL.
                   </p>
                 </div>
 
@@ -1945,7 +1945,7 @@ export default function App() {
                     <div className="flex items-start justify-between gap-2.5">
                       <div className="space-y-0.5">
                         <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Cópia Semanal na Cloud</span>
-                        <p className="text-[10px] text-slate-500 leading-tight">Sincroniza automaticamente a base de dados centralizada no Firestore.</p>
+                        <p className="text-[10px] text-slate-500 leading-tight">Sincroniza automaticamente a base de dados centralizada no Supabase PostgreSQL.</p>
                       </div>
                       <label className="relative inline-flex items-center cursor-pointer">
                         <input 
@@ -1991,7 +1991,7 @@ export default function App() {
                   {loadingBackups ? (
                     <div className="flex flex-col items-center justify-center py-10 space-y-2 text-slate-400">
                       <RefreshCw className="w-5 h-5 animate-spin text-[#00897b]" />
-                      <span className="text-[10px] font-bold uppercase tracking-wider">A verificar Firestore...</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider">A verificar Supabase...</span>
                     </div>
                   ) : cloudBackupsList.length > 0 ? (
                     <div className="space-y-2.5 max-h-[220px] overflow-y-auto pr-1">
@@ -2474,7 +2474,7 @@ export default function App() {
                         <div className="flex-1 text-left">
                           <h3 className="text-xs font-black text-slate-800 dark:text-slate-100 uppercase tracking-widest">Cópias Seguras</h3>
                           <p className="text-[11px] text-slate-650 dark:text-slate-400 mt-1 leading-relaxed font-semibold">
-                            Salve todos os livros, locais e histórico de lançamentos em nuvem usando autenticação ultra-segura no Firestore.
+                            Salve todos os livros, locais e histórico de lançamentos em nuvem usando autenticação ultra-segura no Supabase PostgreSQL.
                           </p>
                         </div>
                       </div>
@@ -2503,7 +2503,7 @@ export default function App() {
                       {loadingBackups ? (
                         <div className="flex flex-col items-center justify-center py-20 space-y-3 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800/80 rounded-[2.5rem]">
                           <RefreshCw className="w-8 h-8 animate-spin text-cyan-500" />
-                          <span className="text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">Conectando ao Firestore...</span>
+                          <span className="text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">Conectando ao Supabase...</span>
                         </div>
                       ) : cloudBackupsList.length > 0 ? (
                         <motion.div 
@@ -3042,7 +3042,7 @@ export default function App() {
           <div className="space-y-1">
             <h4 className="font-bold text-slate-800 dark:text-slate-100 text-lg">Cópia de Segurança</h4>
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-              Deseja iniciar a salvaguarda de todos os livros ({books.length} itens) e registos de histórico de inventário na Cloud do Firebase Firestore agora?
+              Deseja iniciar a salvaguarda de todos os livros ({books.length} itens) e registos de histórico de inventário na Cloud do Supabase PostgreSQL agora?
             </p>
           </div>
           <div className="flex gap-2.5 pt-2">
