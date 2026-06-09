@@ -1,0 +1,199 @@
+@import url('https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,300;0,400;0,700;1,400&family=Poppins:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-poppins: "Poppins", sans-serif;
+  --font-merriweather: "Merriweather", serif;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+@layer base {
+  input, select, textarea {
+    @apply border-slate-300 dark:border-slate-400 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors;
+  }
+  button:not(:disabled) {
+    @apply transition-transform duration-200 active:scale-95;
+  }
+}
+
+html:not(.dark) body {
+  background-image: url('/light-bg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-color: #f8fafc; /* Fallback color for bg-slate-50 */
+}
+
+/* Base transparency for light mode container to show background */
+html:not(.dark) .min-h-screen {
+  background-color: transparent !important;
+}
+
+/* Semi-transparent overrides for main components in light mode */
+html:not(.dark) .bg-white {
+  background-color: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+}
+
+html:not(.dark) .bg-slate-50 {
+  background-color: rgba(248, 250, 252, 0.7);
+}
+
+html.dark body {
+  background-image: url('/dark-bg.jpg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-color: #0f172a; /* Fallback color */
+}
+
+html.dark .bg-white {
+  background-color: rgba(15, 23, 42, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.dark .bg-white\/80 {
+  background-color: rgba(15, 23, 42, 0.7) !important;
+  backdrop-filter: blur(12px);
+}
+
+html.dark .bg-white\/60 {
+  background-color: rgba(15, 23, 42, 0.5) !important;
+}
+
+html.dark .bg-slate-50 {
+  background-color: rgba(15, 23, 42, 0.6) !important;
+  border-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+html.dark .bg-slate-50\/50 {
+  background-color: rgba(15, 23, 42, 0.4) !important;
+}
+
+html.dark .hover\:bg-slate-50\/50:hover {
+  background-color: rgba(15, 23, 42, 0.5) !important;
+}
+
+html.dark .bg-slate-100 {
+  background-color: rgba(30, 41, 59, 0.7) !important;
+}
+
+html.dark .hover\:bg-slate-100:hover {
+  background-color: rgba(30, 41, 59, 0.9) !important;
+}
+
+html.dark .bg-slate-200 {
+  background-color: rgba(51, 65, 85, 0.7) !important;
+}
+
+html.dark .hover\:bg-slate-200:hover {
+  background-color: rgba(51, 65, 85, 0.9) !important;
+}
+
+html.dark .text-slate-900,
+html.dark .text-slate-800,
+html.dark .text-slate-700 {
+  color: #f8fafc !important;
+}
+
+/* Hardcode specific inputs text to keep legibility against their fixed light bg in dark mode */
+html.dark input.text-slate-900,
+html.dark select.text-slate-900,
+html.dark textarea.text-slate-900,
+html.dark .dark\:text-slate-900 {
+  color: #0f172a !important; 
+}
+
+html.dark .text-slate-600,
+html.dark .text-slate-500 {
+  color: #cbd5e1 !important;
+}
+
+html.dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+html.dark .bg-emerald-50,
+html.dark .bg-amber-50,
+html.dark .bg-cyan-50,
+html.dark .bg-sky-50,
+html.dark .bg-indigo-50,
+html.dark .bg-rose-50 {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+html.dark .bg-emerald-100,
+html.dark .bg-amber-100,
+html.dark .bg-cyan-100,
+html.dark .bg-sky-100,
+html.dark .bg-indigo-100,
+html.dark .bg-rose-100 {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+html.dark .bg-emerald-50\/50,
+html.dark .bg-amber-50\/50,
+html.dark .bg-cyan-50\/50,
+html.dark .bg-sky-50\/50,
+html.dark .bg-indigo-50\/50,
+html.dark .bg-rose-50\/50 {
+  background-color: rgba(255, 255, 255, 0.03) !important;
+}
+
+html.dark .bg-emerald-50\/60,
+html.dark .bg-amber-50\/60,
+html.dark .bg-cyan-50\/60,
+html.dark .bg-sky-50\/60,
+html.dark .bg-indigo-50\/60,
+html.dark .bg-rose-50\/60 {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+html.dark .text-emerald-700 { color: #4ade80 !important; }
+html.dark .text-amber-700 { color: #fbbf24 !important; }
+html.dark .text-cyan-700 { color: #22d3ee !important; }
+html.dark .text-sky-700 { color: #38bdf8 !important; }
+html.dark .text-indigo-700 { color: #818cf8 !important; }
+html.dark .text-rose-700 { color: #fb7185 !important; }
+
+html.dark .text-emerald-600 { color: #4ade80 !important; }
+html.dark .text-amber-600 { color: #fbbf24 !important; }
+html.dark .text-cyan-600 { color: #22d3ee !important; }
+html.dark .text-sky-600 { color: #38bdf8 !important; }
+html.dark .text-indigo-600 { color: #818cf8 !important; }
+html.dark .text-rose-600 { color: #fb7185 !important; }
+
+html.dark .border-slate-50,
+html.dark .border-slate-100,
+html.dark .border-slate-200 {
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+html.dark .border-slate-100\/50 {
+  border-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+@media print {
+  @page {
+    margin: 1cm;
+    size: A4 portrait;
+  }
+  body, html {
+    background: white !important;
+    color: black !important;
+  }
+}

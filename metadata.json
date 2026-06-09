@@ -1,0 +1,6 @@
+{
+  "name": "Literatura",
+  "description": "Sistema de controlo de stock de literatura com suporte para múltiplas localizações e histórico mensal.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

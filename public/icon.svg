@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <style>
+      .cover { fill: #86efac; stroke: #022c22; stroke-width: 16; stroke-linejoin: round; stroke-linecap: round; }
+      .page { fill: #f8fafc; stroke: #022c22; stroke-width: 16; stroke-linejoin: round; }
+      .spiral { fill: #4338ca; stroke: #022c22; stroke-width: 20; stroke-linejoin: round; stroke-linecap: round; }
+      .spiral-back { fill: #312e81; stroke: #022c22; stroke-width: 20; }
+      .label { fill: #eff6ff; stroke: #022c22; stroke-width: 12; stroke-linejoin: round; }
+      .shadow { fill: rgba(0,0,0,0.1); }
+    </style>
+  </defs>
+  
+  <g transform="translate(256, 256) rotate(-25) translate(-256, -256) translate(30, 40)">
+    
+    <!-- White pages -->
+    <path class="page" d="M160,110 L410,110 Q430,110 430,130 L430,420 Q430,440 410,440 L160,440 Z" />
+    <path class="page" d="M140,80 L390,80 Q410,80 410,100 L410,390 Q410,410 390,410 L140,410 Z" />
+    
+    <!-- Cover -->
+    <path class="cover" d="M110,60 L360,60 Q380,60 380,80 L380,370 Q380,390 360,390 L110,390 Z" />
+    
+    <!-- Book fold / binding edge highlight -->
+    <path d="M130,60 L130,390" stroke="#022c22" stroke-width="12" opacity="0.3" stroke-linecap="round"/>
+    
+    <!-- Title Label -->
+    <rect class="label" x="200" y="100" width="130" height="70" rx="12" />
+
+    <!-- Spiral 1 -->
+    <path class="spiral-back" d="M110,120 C70,120 50,140 50,170" />
+    <path class="spiral" d="M50,170 C50,220 180,210 160,130 C150,100 120,100 110,120" />
+    <path class="page" d="M130,130 A 10 10 0 1 1 120 150 A 10 10 0 1 1 130 130 Z" opacity="0.8" stroke-width="0" fill="#022c22" />
+
+    <!-- Spiral 2 -->
+    <path class="spiral-back" d="M110,210 C70,210 50,230 50,260" />
+    <path class="spiral" d="M50,260 C50,310 180,300 160,220 C150,190 120,190 110,210" />
+    <path class="page" d="M130,220 A 10 10 0 1 1 120 240 A 10 10 0 1 1 130 220 Z" opacity="0.8" stroke-width="0" fill="#022c22" />
+
+    <!-- Spiral 3 -->
+    <path class="spiral-back" d="M110,300 C70,300 50,320 50,350" />
+    <path class="spiral" d="M50,350 C50,400 180,390 160,310 C150,280 120,280 110,300" />
+    <path class="page" d="M130,310 A 10 10 0 1 1 120 330 A 10 10 0 1 1 130 310 Z" opacity="0.8" stroke-width="0" fill="#022c22" />
+
+  </g>
+</svg>
