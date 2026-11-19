@@ -44,6 +44,8 @@ import {
   Mail,
   Phone,
   Users,
+  Wifi,
+  Battery,
   Shield, UserPlus, UserMinus, Loader2, LogOut,
   LayoutDashboard, PieChart as PieChartIcon, BarChart3,
   PlusCircle, Edit, TrendingUp, TrendingDown, Archive, Clock, RefreshCw
@@ -54,7 +56,7 @@ import {
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 
-import { logout } from './supabase';
+import { logout, supabase } from './supabase';
 import { useSupabaseSync as useFirebaseSync, BookItemCloud } from './supabase-sync';
 import LoginScreen from './components/LoginScreen';
 
@@ -86,10 +88,10 @@ const LOCATIONS: string[] = ['MANANGA PT', 'CHOTA PT'];
 const CORRECT_PIN = '2027';
 
 const CAT_META: Record<Category, { icon: React.ReactNode; color: string; label: string }> = {
-  'Bíblias': { icon: <Book className="w-4 h-4" />, color: 'bg-indigo-100 text-indigo-800', label: 'Bíblias' },
-  'Livros': { icon: <BookOpen className="w-4 h-4" />, color: 'bg-sky-100 text-sky-800', label: 'Livros' },
-  'Brochuras e Folhetos': { icon: <FileBox className="w-4 h-4" />, color: 'bg-emerald-100 text-emerald-800', label: 'Brochuras' },
-  'Formulários': { icon: <ClipboardList className="w-4 h-4" />, color: 'bg-amber-100 text-amber-800', label: 'Formulários' },
+  'Bíblias': { icon: <Book className="w-4 h-4" />, color: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-500/20 dark:text-indigo-200', label: 'Bíblias' },
+  'Livros': { icon: <BookOpen className="w-4 h-4" />, color: 'bg-sky-100 text-sky-800 dark:bg-sky-500/20 dark:text-sky-200', label: 'Livros' },
+  'Brochuras e Folhetos': { icon: <FileBox className="w-4 h-4" />, color: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-500/20 dark:text-emerald-200', label: 'Brochuras' },
+  'Formulários': { icon: <ClipboardList className="w-4 h-4" />, color: 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200', label: 'Formulários' },
 };
 
 // --- Helpers ---
@@ -165,7 +167,11 @@ export default function App() {
     user,
     authLoading,
     workspace,
-    updateWorkspaceSettings
+    updateWorkspaceSettings,
+    updateWorkspaceAccessList,
+    updateUserDisplayName,
+    supabaseStatus,
+    recheckConnection
   } = useFirebaseSync();
   
   // --- State ---
@@ -179,7 +185,9 @@ export default function App() {
   const [deleteLocked, setDeleteLocked] = useState(true);
   const [showMenu, setShowMenu] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const [notifActiveTab, setNotifActiveTab] = useState<'alerts' | 'backups'>('alerts');
+  const [notifActiveTab, setNotifActiveTab] = useState<'alerts' | 'backups' | 'users'>('alerts');
+  const [profilesList, setProfilesList] = useState<any[]>([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [detailBookCode, setDetailBookCode] = useState<string | null>(null);
   const [showPinDialog, setShowPinDialog] = useState(false);
@@ -212,19 +220,70 @@ export default function App() {
   const [lowStockThreshold, setLowStockThreshold] = useState<number>(
     workspace?.lowStockThreshold ?? 10
   );
+  const [lastActiveThreshold, setLastActiveThreshold] = useState<number>(() => {
+    const val = workspace?.lowStockThreshold ?? 10;
+    return val > 0 ? val : 10;
+  });
   const [autoCloudBackupEnabled, setAutoCloudBackupEnabled] = useState<boolean>(() => {
     const saved = localStorage.getItem('lit2026_autoCloudBackupEnabled');
     return saved !== null ? JSON.parse(saved) : false;
   });
   // Logs apenas em memória — os backups reais estão no Firestore
   const [cloudBackupLogs, setCloudBackupLogs] = useState<string[]>([]);
-  const isAdmin = user?.email === 'derciojaimebalane21@gmail.com';
+  const permanentAdmins = ['derciojaimebalane21@gmail.com', 'derciojaimebalane@outlook.com'];
+  const isAdmin = user?.email && permanentAdmins.includes(user.email.toLowerCase().trim());
+
+  const currentUserRole = (() => {
+    const normEmail = user?.email?.toLowerCase().trim();
+    if (normEmail && permanentAdmins.includes(normEmail)) return 'admin';
+    if (!workspace?.accessList || !Array.isArray(workspace.accessList)) return 'collaborator';
+    const access = workspace.accessList.find((p: any) => p?.email?.toLowerCase().trim() === normEmail);
+    if (!access) return 'collaborator';
+    
+    const r = (access.role || 'operator').toLowerCase().trim();
+    if (r === 'admin' || r === 'administrador') return 'admin';
+    if (r === 'operator' || r === 'operador') return 'operator';
+    if (r === 'collaborator' || r === 'colaborador') return 'collaborator';
+    return 'collaborator';
+  })();
+
+  const checkLocationPermission = (locName: string): boolean => {
+    const normUserEmail = user?.email?.toLowerCase().trim();
+    if (normUserEmail && permanentAdmins.includes(normUserEmail)) return true;
+    if (!workspace?.accessList || !Array.isArray(workspace.accessList)) return false;
+
+    const normEmail = user?.email?.toLowerCase().trim();
+    if (!normEmail) return false;
+    const setting = workspace.accessList.find((p: any) => p?.email?.toLowerCase().trim() === normEmail);
+
+    if (!setting) return false;
+    const roleNormalized = (setting.role || 'operator').toLowerCase().trim();
+    if (roleNormalized === 'admin' || roleNormalized === 'administrador') return true;
+
+    if (roleNormalized === 'operator' || roleNormalized === 'operador') {
+      const allowedLocs = Array.isArray(setting.locations) ? setting.locations : [];
+      return allowedLocs.some((l: string) => l.toLowerCase().trim() === locName.toLowerCase().trim());
+    }
+
+    // collaborator/colaborador is read-only (returns false)
+    return false;
+  };
 
   useEffect(() => {
-    if (workspace?.lowStockThreshold) {
+    if (workspace?.lowStockThreshold !== undefined) {
       setLowStockThreshold(workspace.lowStockThreshold);
+      if (workspace.lowStockThreshold > 0) {
+        setAndRememberThreshold(workspace.lowStockThreshold);
+      }
     }
   }, [workspace?.lowStockThreshold]);
+
+  const setAndRememberThreshold = (val: number) => {
+    setLowStockThreshold(val);
+    if (val > 0) {
+      setLastActiveThreshold(val);
+    }
+  };
 
 
 
@@ -264,6 +323,98 @@ export default function App() {
       fetchCloudBackups();
     }
   }, [showNotifications, isAdmin]);
+
+  const fetchProfiles = async () => {
+    setLoadingProfiles(true);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*');
+      if (error) throw error;
+      setProfilesList(data || []);
+    } catch (err) {
+      console.error("Error fetching profiles:", err);
+    } finally {
+      setLoadingProfiles(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showNotifications && isAdmin && notifActiveTab === 'users') {
+      fetchProfiles();
+    }
+  }, [showNotifications, isAdmin, notifActiveTab]);
+
+  const handleUpdateUserRole = async (userId: string, newRole: string) => {
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ role: newRole })
+        .eq('id', userId);
+      if (error) throw error;
+      
+      const updatedProfiles = profilesList.map(p => p.id === userId ? { ...p, role: newRole } : p);
+      setProfilesList(updatedProfiles);
+      
+      const email = profilesList.find(p => p.id === userId)?.email;
+      if (email && workspace?.accessList) {
+        const existing = workspace.accessList.find((x: any) => x.email?.toLowerCase().trim() === email.toLowerCase().trim());
+        if (existing) {
+          const updatedAccess = workspace.accessList.map((x: any) => 
+            x.email?.toLowerCase().trim() === email.toLowerCase().trim() 
+              ? { ...x, role: newRole } 
+              : x
+          );
+          await updateWorkspaceAccessList(updatedAccess);
+        }
+      }
+      
+      showToast('Cargo atualizado!');
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Erro ao atualizar cargo: ${err.message || err}`);
+    }
+  };
+
+  const handleToggleLocationPermission = async (email: string, location: string) => {
+    if (!workspace) return;
+    try {
+      const accessList = workspace.accessList || [];
+      const normEmail = email.toLowerCase().trim();
+      let list = [...accessList];
+      let existing = list.find((x: any) => x.email?.toLowerCase().trim() === normEmail);
+      
+      if (!existing) {
+        const profile = profilesList.find(p => p.email?.toLowerCase().trim() === normEmail);
+        existing = {
+          email: normEmail,
+          role: profile?.role || 'operator',
+          locations: [location]
+        };
+        list.push(existing);
+      } else {
+        const allowed = Array.isArray(existing.locations) ? [...existing.locations] : [];
+        let updatedAllowed;
+        if (allowed.some(l => l.toLowerCase().trim() === location.toLowerCase().trim())) {
+          updatedAllowed = allowed.filter((l: string) => l.toLowerCase().trim() !== location.toLowerCase().trim());
+        } else {
+          updatedAllowed = [...allowed, location];
+        }
+        
+        list = list.map((x: any) => 
+          x.email?.toLowerCase().trim() === normEmail 
+            ? { ...x, locations: updatedAllowed } 
+            : x
+        );
+      }
+      
+      await updateWorkspaceAccessList(list);
+      showToast('Acessos do utilizador atualizados.');
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Erro ao atualizar acessos: ${err?.message || err}`);
+    }
+  };
 
   const handleDownloadCloudBackup = (backup: any) => {
     try {
@@ -500,6 +651,11 @@ export default function App() {
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
+  const [pinActionType, setPinActionType] = useState<'unlock' | 'updateName'>('unlock');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [newDisplayName, setNewDisplayName] = useState('');
+  const [pendingNameUpdate, setPendingNameUpdate] = useState<string | null>(null);
+  const [nameUpdateLoading, setNameUpdateLoading] = useState(false);
   
   // App Sync & Auth State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -513,6 +669,10 @@ export default function App() {
     const saved = localStorage.getItem('lit2026_darkmode');
     if (saved !== null) return JSON.parse(saved);
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+  const [autoTheme, setAutoTheme] = useState<boolean>(() => {
+    const saved = localStorage.getItem('lit2026_autotheme');
+    return saved !== null ? JSON.parse(saved) : false;
   });
   const [adjustModal, setAdjustModal] = useState<{
     isOpen: boolean;
@@ -534,6 +694,20 @@ export default function App() {
       document.documentElement.classList.remove('dark');
     }
   }, [darkMode]);
+
+  useEffect(() => {
+    localStorage.setItem('lit2026_autotheme', JSON.stringify(autoTheme));
+    if (autoTheme) {
+      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      setDarkMode(mediaQuery.matches);
+      
+      const listener = (e: MediaQueryListEvent) => {
+        setDarkMode(e.matches);
+      };
+      mediaQuery.addEventListener('change', listener);
+      return () => mediaQuery.removeEventListener('change', listener);
+    }
+  }, [autoTheme]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -787,6 +961,11 @@ export default function App() {
     const b = books.find(x => x.id === id);
     if (!b) return;
     
+    if (!checkLocationPermission(b.loc)) {
+      showToast(`Acesso negado: Não tem permissão para editar no local "${b.loc}"`);
+      return;
+    }
+    
     const currentAvail = getAvail(b);
     if (dir === -1 && currentAvail < amount) {
       showToast(`Stock insuficiente! Apenas ${currentAvail} disponíveis.`);
@@ -806,7 +985,7 @@ export default function App() {
     }
 
     const newLog = {
-      who: user?.email || 'Anónimo',
+      who: user?.displayName || user?.email || 'Anónimo',
       when: new Date().toISOString(),
       type: dir === 1 ? 'Entrada' : 'Saída',
       amount: amount
@@ -874,6 +1053,21 @@ export default function App() {
     }
 
     setIsSaving(true);
+
+    if (!checkLocationPermission(formData.location)) {
+      showToast(`Acesso negado: Não tem permissão para fazer alterações no local "${formData.location}"`);
+      setIsSaving(false);
+      return;
+    }
+
+    if (editId) {
+      const original = books.find(x => x.id === editId);
+      if (original && !checkLocationPermission(original.loc)) {
+        showToast(`Acesso negado: Não tem permissão para fazer alterações no local original "${original.loc}"`);
+        setIsSaving(false);
+        return;
+      }
+    }
     
     try {
       const codeTrimmed = formData.code.trim().toLowerCase();
@@ -943,6 +1137,10 @@ export default function App() {
   };
 
   const handleOpenEdit = (b: BookItem) => {
+    if (!checkLocationPermission(b.loc)) {
+      showToast(`Acesso negado: Não tem permissão para editar livros no local "${b.loc}"`);
+      return;
+    }
     setEditId(b.id);
     setFormData({
       name: b.name,
@@ -1025,6 +1223,10 @@ export default function App() {
       showToast('Selecione um local primeiro');
       return;
     }
+    if (!checkLocationPermission(activeLocation)) {
+      showToast(`Acesso negado: Não tem permissão para adicionar livros no local "${activeLocation}"`);
+      return;
+    }
     setEditId(null);
     setFormData({
       name: '',
@@ -1040,6 +1242,11 @@ export default function App() {
   };
 
   const handleDelete = (id: string) => {
+    const bookToDelete = books.find(x => x.id === id);
+    if (bookToDelete && !checkLocationPermission(bookToDelete.loc)) {
+      showToast(`Acesso negado: Não tem permissão para remover livros no local "${bookToDelete.loc}"`);
+      return;
+    }
     if (deleteLocked) {
       showToast('Ação bloqueada');
       return;
@@ -1050,6 +1257,13 @@ export default function App() {
 
   const confirmDelete = async () => {
     if (pendingDeleteId) {
+      const bookToDelete = books.find(x => x.id === pendingDeleteId);
+      if (bookToDelete && !checkLocationPermission(bookToDelete.loc)) {
+        showToast(`Acesso negado: Não tem permissão para remover livros no local "${bookToDelete.loc}"`);
+        setPendingDeleteId(null);
+        setShowConfirmDelete(false);
+        return;
+      }
       await deleteBook(pendingDeleteId);
       showToast('Livro removido');
     }
@@ -1057,17 +1271,94 @@ export default function App() {
     setShowConfirmDelete(false);
   };
 
-  const handlePinSubmit = () => {
-    if (pinInput === CORRECT_PIN) {
-      setDeleteLocked(false);
+  const handlePinSubmit = useCallback((val?: string) => {
+    const code = val !== undefined ? val : pinInput;
+    if (code === CORRECT_PIN) {
+      if (pinActionType === 'updateName' && pendingNameUpdate) {
+        setNameUpdateLoading(true);
+        updateUserDisplayName(pendingNameUpdate)
+          .then(() => {
+            showToast('Nome de utilizador atualizado!');
+            setIsEditingName(false);
+          })
+          .catch((err: any) => {
+            console.error(err);
+            showToast('Erro ao atualizar nome: ' + (err.message || err));
+          })
+          .finally(() => {
+            setNameUpdateLoading(false);
+            setPendingNameUpdate(null);
+          });
+      } else {
+        setDeleteLocked(false);
+        showToast('Desbloqueado');
+      }
       setShowPinDialog(false);
       setPinInput('');
-      showToast('Desbloqueado');
+      setPinError('');
     } else {
       setPinError('PIN incorrecto');
       setPinInput('');
     }
-  };
+  }, [pinInput, pinActionType, pendingNameUpdate, updateUserDisplayName, setDeleteLocked, setShowPinDialog, setPinInput, setPinError, showToast]);
+
+  const handleVirtualKeyPress = useCallback((key: string) => {
+    setPinError('');
+    if (key === 'C') {
+      setPinInput('');
+    } else if (key === '⌫') {
+      setPinInput(p => p.slice(0, -1));
+    } else {
+      setPinInput(p => {
+        if (p.length < 4) {
+          const newVal = p + key;
+          if (newVal.length === 4) {
+            setTimeout(() => {
+              handlePinSubmit(newVal);
+            }, 180);
+          }
+          return newVal;
+        }
+        return p;
+      });
+    }
+  }, [handlePinSubmit, setPinInput, setPinError]);
+
+  useEffect(() => {
+    if (!showPinDialog) return;
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowPinDialog(false);
+        setPinInput('');
+        setPinError('');
+        return;
+      }
+      if (e.key >= '0' && e.key <= '9') {
+        setPinError('');
+        setPinInput(p => {
+          if (p.length < 4) {
+            const newVal = p + e.key;
+            if (newVal.length === 4) {
+              setTimeout(() => {
+                handlePinSubmit(newVal);
+              }, 180);
+            }
+            return newVal;
+          }
+          return p;
+        });
+      } else if (e.key === 'Backspace') {
+        setPinError('');
+        setPinInput(p => p.slice(0, -1));
+      } else if (e.key === 'Enter') {
+        handlePinSubmit();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showPinDialog, handlePinSubmit]);
 
   const exportCSV = () => {
     const data = filteredBooks;
@@ -1186,7 +1477,7 @@ export default function App() {
           </div>
           <div className="absolute inset-0 bg-[#00897b]/10 rounded-full blur-xl animate-pulse" />
         </div>
-        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-black uppercase tracking-wider mt-6 animate-pulse">
+        <p className="text-[10px] text-slate-600 dark:text-slate-300 font-black uppercase tracking-wider mt-6 animate-pulse">
           A ligar à base de dados...
         </p>
       </div>
@@ -1194,7 +1485,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen />;
+    return <LoginScreen supabaseStatus={supabaseStatus} onRetryConnection={recheckConnection} />;
   }
 
   return (
@@ -1202,76 +1493,126 @@ export default function App() {
       <div className="min-h-screen print:hidden bg-[#F4F4F5] dark:bg-slate-900 font-poppins pb-32 text-slate-900 dark:text-slate-100 transition-colors duration-300 flex flex-col">
       <input type="file" id="import-input" className="hidden" accept=".json" onChange={importBackup} data-styled="true" />
       
-      {/* Sleek Dynamic Header */}
-      <div className={`pt-7 pb-5 px-5 sticky top-0 z-40 shadow-md backdrop-blur-md transition-all duration-500 rounded-b-[2rem] border-b ${isLive ? 'bg-gradient-to-r from-[#00695c] via-[#00897b] to-[#005a50] border-emerald-400/20 shadow-emerald-950/10 text-white' : 'bg-gradient-to-r from-[#512da8] via-[#7b1fa2] to-[#4a148c] border-purple-400/20 shadow-purple-950/10 text-white'}`}>
-        <div className="max-w-3xl mx-auto">
+      {/* Sleek Dynamic Header estilo iOS */}
+      <div className={`sticky top-0 z-40 backdrop-blur-xl border-b transition-all duration-300 rounded-b-[1.25rem] ${
+        isLive 
+          ? 'bg-white/85 dark:bg-slate-900/85 border-[#34c759]/10 dark:border-emerald-500/10 shadow-sm shadow-emerald-500/5' 
+          : 'bg-white/85 dark:bg-slate-900/85 border-[#5856D6]/10 dark:border-indigo-500/10 shadow-sm shadow-indigo-500/5'
+      }`}>
+        <div className="max-w-3xl mx-auto px-5 pt-5 pb-4.5">
           {/* Header Top Bar */}
-          <div className="flex items-center justify-between mb-4.5">
-             <div className="flex items-center gap-3.5 group">
+          <div className="flex items-center justify-between mb-4">
+             <div className="flex items-center gap-3 group">
                 <div className="relative shrink-0">
-                   <img src="/icon.png" alt="Literatura Logo" className="w-13 h-13 rounded-2xl shadow-md object-cover bg-white ring-2 ring-white/10 group-hover:scale-105 transition-all duration-300" />
-                   <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 border-2 border-slate-900 rounded-full ${!isOnline ? 'bg-[#ef4444]' : 'bg-[#10b981]'}`} />
+                   <img 
+                     src="/icon.png" 
+                     alt="Literatura Logo" 
+                     className="w-12 h-12 rounded-[0.95rem] shadow-sm object-cover bg-white ring-1 ring-slate-100 dark:ring-slate-800 group-hover:scale-103 transition-transform duration-300" 
+                   />
+                   <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 border-2 border-white dark:border-slate-900 rounded-full shadow-sm ${!isOnline ? 'bg-[#ff3b30]' : 'bg-[#34c759]'}`} />
                 </div>
                 <div>
-                   <h1 className="text-xl sm:text-2xl font-black tracking-tight leading-none text-white drop-shadow-sm">Literatura</h1>
-                   <div className="flex items-center gap-2 mt-1.5">
+                   <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-50 leading-tight">
+                     Literatura
+                   </h1>
+                   <div className="flex items-center gap-2 mt-1">
                       {isAuthenticated && (
-                        <span className={`flex items-center gap-1 opacity-90 text-[10px] font-bold tracking-wider uppercase ${!isOnline ? 'bg-red-500/80 px-2' : 'bg-white/15 px-2'} py-0.5 rounded-full`}>
-                           <Cloud className="w-3 h-3" />
-                           {!isOnline ? 'Offline' : (isSyncing || syncing ? 'Sincronizando...' : 'Sincronizado')}
+                        <span className={`flex items-center gap-1.2 text-[9px] font-bold tracking-wider uppercase ${
+                          !isOnline 
+                            ? 'bg-[#ff3b30]/10 text-[#ff3b30] border border-[#ff3b30]/20' 
+                            : (isSyncing || syncing 
+                                ? 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25' 
+                                : 'bg-[#34c759]/10 text-[#1e8e3e] dark:text-emerald-300 border border-[#34c759]/25'
+                              )
+                        } px-2 py-0.5 rounded-full font-sans`} style={{ letterSpacing: '0.05em' }}>
+                           <Cloud className="w-2.8 h-2.8 shrink-0" />
+                           {!isOnline ? 'Offline' : (isSyncing || syncing ? 'A Sincronizar...' : 'Sincronizado')}
                         </span>
                       )}
-                      <span className="text-[10px] opacity-75 font-semibold text-white/80 hidden sm:inline">
-                         Congregação • Inventário
+                      
+                      <span className="text-[10px] font-medium text-slate-500 dark:text-slate-300 hidden sm:inline">
+                         • Congregação • Inventário
                       </span>
                    </div>
                 </div>
              </div>
 
-             <div className="flex items-center gap-2">
-                {/* Notifications */}
+             <div className="flex items-center gap-1.5">
+                {/* Notifications Link resembling iOS button bar */}
                 <div className="relative">
-                  <button onClick={() => { setShowNotifications(true); setShowMenu(false); }} className="p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 text-white rounded-full transition-all relative">
-                    <Bell className="w-5 h-5" />
-                    {isLive && lowStockBooks.length > 0 && <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-rose-500 border-2 border-teal-600 rounded-full animate-ping"></span>}
-                    {isLive && lowStockBooks.length > 0 && <span className="absolute top-0.5 right-0.5 w-2.5 h-2.5 bg-rose-500 border-2 border-teal-600 rounded-full"></span>}
-                  </button>
+                   <button 
+                     onClick={() => { setShowNotifications(true); setShowMenu(false); }} 
+                     className="p-2.5 bg-slate-100/60 hover:bg-slate-200/50 dark:bg-slate-800/80 dark:hover:bg-slate-700/80 active:scale-95 text-slate-600 dark:text-slate-200 rounded-full transition-all relative cursor-pointer"
+                   >
+                     <Bell className="w-4.5 h-4.5" />
+                     {isLive && lowStockBooks.length > 0 && (
+                       <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-[#ff3b30] border border-white dark:border-slate-900 rounded-full animate-ping" />
+                     )}
+                     {isLive && lowStockBooks.length > 0 && (
+                       <span className="absolute top-1 right-1 w-2.5 h-2.5 bg-[#ff3b30] border border-white dark:border-slate-900 rounded-full" />
+                     )}
+                   </button>
                 </div>
                 
                 {/* Menu */}
                 <div className="relative" ref={menuRef}>
-                  <button onClick={() => { setShowMenu(!showMenu); setShowNotifications(false); }} className="p-2.5 bg-white/10 hover:bg-white/20 active:scale-95 text-white rounded-full transition-all relative">
-                    <MoreVertical className="w-5 h-5" />
+                  <button 
+                    onClick={() => { setShowMenu(!showMenu); setShowNotifications(false); }} 
+                    className="p-2.5 bg-slate-100/60 hover:bg-slate-200/50 dark:bg-slate-800/80 dark:hover:bg-slate-700/80 active:scale-95 text-slate-600 dark:text-slate-200 rounded-full transition-all relative cursor-pointer"
+                  >
+                     <MoreVertical className="w-4.5 h-4.5" />
                   </button>
                   <AnimatePresence>
                     {showMenu && (
                       <motion.div 
-                        initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                        initial={{ opacity: 0, scale: 0.95, y: 8 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95, y: 10 }}
-                        className="absolute right-0 top-full mt-2 w-56 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700/60 overflow-hidden py-2 z-50 text-slate-900 dark:text-slate-100"
+                        exit={{ opacity: 0, scale: 0.95, y: 8 }}
+                        transition={{ duration: 0.15, ease: "easeOut" }}
+                        className="absolute right-0 top-full mt-2 w-56 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-100/80 dark:border-slate-700/80 overflow-hidden py-1.5 z-50 text-slate-900 dark:text-slate-100"
                       >
-                        <button  onClick={handleOpenNew} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-bold text-[#00897b] dark:text-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent">
+                        <button onClick={handleOpenNew} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-xs font-bold text-[#1e8e3e] dark:text-emerald-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent cursor-pointer">
                           <Plus className="w-4 h-4" /> Novo Livro
                         </button>
 
-                        <div className="h-px bg-slate-100 dark:bg-slate-700 mx-3 my-1" />
-                        <button onClick={() => { setShowSettingsModal(true); setShowMenu(false); }} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-medium text-left">
-                          <Settings className="w-4 h-4 text-slate-400 dark:text-slate-500" /> Configurações
+                        <div className="h-px bg-slate-100 dark:bg-slate-800 mx-3.5 my-1" />
+                        <button onClick={() => { setShowSettingsModal(true); setShowMenu(false); }} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-xs font-medium text-left cursor-pointer text-slate-700 dark:text-slate-200">
+                          <Settings className="w-4 h-4 text-slate-500 dark:text-slate-300" /> Configurações
                         </button>
-                        <button onClick={exportBackup} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-medium text-left">
-                          <Download className="w-4 h-4 text-slate-400 dark:text-slate-500" /> Exportar Backup
+                        <button 
+                          disabled 
+                          className="w-full px-5 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-left text-slate-400 dark:text-slate-400 cursor-not-allowed opacity-50 select-none"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Download className="w-4 h-4 text-slate-400 dark:text-slate-400" /> 
+                            <span>Exportar Backup</span>
+                          </div>
+                          <span className="text-[8px] uppercase font-bold tracking-wider px-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300 border border-slate-200/50 dark:border-slate-700/50 scale-90">Off</span>
                         </button>
                         {isAdmin && (
-                          <button  onClick={triggerImport} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-medium text-left disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent">
-                            <Upload className="w-4 h-4 text-slate-400 dark:text-slate-500" /> Importar Backup
+                          <button 
+                            disabled 
+                            className="w-full px-5 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-left text-slate-400 dark:text-slate-400 cursor-not-allowed opacity-50 select-none"
+                          >
+                            <div className="flex items-center gap-3">
+                              <Upload className="w-4 h-4 text-slate-400 dark:text-slate-400" /> 
+                              <span>Importar Backup</span>
+                            </div>
+                            <span className="text-[8px] uppercase font-bold tracking-wider px-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300 border border-slate-200/50 dark:border-slate-700/50 scale-90">Off</span>
                           </button>
                         )}
-                        <button onClick={exportCSV} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-medium text-left">
-                          <FileText className="w-4 h-4 text-slate-400 dark:text-slate-500" /> Exportar CSV
+                        <button 
+                          disabled 
+                          className="w-full px-5 py-2.5 flex items-center justify-between gap-3 text-xs font-medium text-left text-slate-400 dark:text-slate-400 cursor-not-allowed opacity-50 select-none"
+                        >
+                          <div className="flex items-center gap-3">
+                            <FileText className="w-4 h-4 text-slate-400 dark:text-slate-400" /> 
+                            <span>Exportar CSV</span>
+                          </div>
+                          <span className="text-[8px] uppercase font-bold tracking-wider px-1 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300 border border-slate-200/50 dark:border-slate-700/50 scale-90">Off</span>
                         </button>
-                        <button onClick={() => { window.print(); setShowMenu(false); }} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700/50 text-xs font-medium text-left">
-                          <Printer className="w-4 h-4 text-slate-400 dark:text-slate-500" /> Imprimir
+                        <button onClick={() => { window.print(); setShowMenu(false); }} className="w-full px-5 py-2.5 flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-xs font-medium text-left cursor-pointer text-slate-700 dark:text-slate-200">
+                          <Printer className="w-4 h-4 text-slate-500 dark:text-slate-300" /> Imprimir
                         </button>
                       </motion.div>
                     )}
@@ -1280,17 +1621,36 @@ export default function App() {
              </div>
           </div>
           
-          {/* Month Navigator inline inside header */}
-          <div className="flex items-center justify-between bg-white/10 border border-white/5 rounded-2xl p-1 mb-1 backdrop-blur-sm shadow-inner">
-             <button onClick={() => setViewMonth(getPrevMonthKey(viewMonth))} className="p-2.5 hover:bg-white/15 hover:scale-105 active:scale-95 rounded-xl text-white transition-all">
-               <ChevronLeft className="w-5 h-5 font-bold" />
+          {/* iOS-styled Segmented Container for Month Navigator */}
+          <div className="flex items-center justify-between bg-slate-100/60 dark:bg-slate-800/60 border border-slate-200/40 dark:border-slate-700/60 rounded-[0.95rem] p-0.75 shadow-sm">
+             <button 
+               onClick={() => setViewMonth(getPrevMonthKey(viewMonth))} 
+               className="p-2 hover:bg-white dark:hover:bg-slate-700 active:scale-95 rounded-[0.75rem] text-slate-700 dark:text-slate-200 hover:shadow-sm transition-all cursor-pointer"
+             >
+               <ChevronLeft className="w-4.5 h-4.5 font-bold" />
              </button>
-             <div className="flex flex-col items-center">
-               <span className="text-sm font-extrabold tracking-wide text-white">{getMonthLabel(viewMonth)}</span>
-               <span className="text-[9px] uppercase tracking-widest font-black opacity-85 text-white/90">{isLive ? 'Mês Corrente' : 'Consulta Histórica'}</span>
+             <div className="flex flex-col items-center py-1">
+               <span className="text-sm font-bold tracking-tight text-slate-800 dark:text-slate-100">
+                 {getMonthLabel(viewMonth)}
+               </span>
+               <span className={`text-[9px] uppercase tracking-wider font-extrabold ${
+                 isLive 
+                   ? 'text-[#1e8e3e] dark:text-emerald-300' 
+                   : 'text-[#5856D6] dark:text-indigo-300'
+               }`}>
+                 {isLive ? 'Mês Corrente' : 'Consulta Histórica'}
+               </span>
              </div>
-             <button disabled={isLive} onClick={() => setViewMonth(getNextMonthKey(viewMonth))} className={`p-2.5 rounded-xl text-white transition-all ${isLive ? 'opacity-20 cursor-not-allowed' : 'hover:bg-white/15 hover:scale-105 active:scale-95'}`}>
-               <ChevronRight className="w-5 h-5 font-bold" />
+             <button 
+               disabled={isLive} 
+               onClick={() => setViewMonth(getNextMonthKey(viewMonth))} 
+               className={`p-2 rounded-[0.75rem] transition-all cursor-pointer ${
+                 isLive 
+                   ? 'opacity-0 pointer-events-none' 
+                   : 'text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-700 hover:shadow-sm active:scale-95'
+               }`}
+             >
+               <ChevronRight className="w-4.5 h-4.5 font-bold" />
              </button>
           </div>
         </div>
@@ -1299,17 +1659,17 @@ export default function App() {
       <main className="max-w-3xl mx-auto w-full px-4 pt-6 flex-1 space-y-6">
          {/* Location Pill Tabs */}
          <div className="flex px-1 gap-2 overflow-x-auto no-scrollbar pb-1 -mx-2 sm:mx-0 sm:px-0">
-           {['Total', ...locations].map(loc => (
+           {['Total', ...locations].map((loc, idx) => (
              <button
-               key={loc}
+               key={`loc-tab-${loc}-${idx}`}
                onClick={() => setActiveLocation(loc)}
                className={`flex items-center shrink-0 px-6 py-3 rounded-full text-[13px] font-bold whitespace-nowrap transition-all duration-300 ${
                  activeLocation === loc 
-                   ? 'bg-slate-900 text-white shadow-xl shadow-slate-900/15 scale-[1.03] dark:bg-emerald-500 dark:shadow-emerald-500/20' 
-                   : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700/80 hover:bg-slate-50 dark:hover:bg-slate-700/40 hover:text-slate-800 dark:hover:text-slate-200 active:scale-98'
+                   ? 'bg-slate-900 text-white shadow-xl shadow-slate-900/15 scale-[1.03] dark:bg-emerald-600 dark:shadow-emerald-500/20' 
+                   : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700/60 hover:text-slate-900 dark:hover:text-slate-100 active:scale-98'
                }`}
              >
-               <MapPin className={`w-3.5 h-3.5 mr-1.5 transition-transform ${activeLocation === loc ? 'scale-110 text-emerald-400 dark:text-emerald-100' : 'opacity-60 text-slate-400 dark:text-slate-500'}`} />
+               <MapPin className={`w-3.5 h-3.5 mr-1.5 transition-transform ${activeLocation === loc ? 'scale-110 text-emerald-300 dark:text-emerald-100' : 'text-slate-500 dark:text-slate-300'}`} />
                {loc}
              </button>
            ))}
@@ -1319,21 +1679,21 @@ export default function App() {
          <div className="bg-white dark:bg-slate-800 rounded-3xl p-5 border border-slate-100 dark:border-slate-700/85 flex flex-col gap-4.5 sticky top-[135px] z-30 mx-0 sm:-mx-2 md:mx-0 shadow-xl shadow-slate-900/5 dark:shadow-black/20 backdrop-blur-md transition-all duration-300">
             {/* Search */}
             <div className="relative group flex items-center">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 group-focus-within:text-emerald-500 group-focus-within:scale-105 transition-all duration-300 pointer-events-none" />
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500 dark:text-slate-300 group-focus-within:text-emerald-500 group-focus-within:scale-105 transition-all duration-300 pointer-events-none" />
               <input 
                 type="text"
                 placeholder="Pesquise por título, código ou categoria..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-11 pr-4 py-3.5 text-sm font-semibold bg-slate-50 dark:bg-slate-900/60 text-slate-800 dark:text-slate-100 rounded-2xl border border-slate-100 dark:border-slate-800 focus:border-emerald-500/30 focus:bg-emerald-50/20 dark:focus:bg-emerald-950/20 focus:ring-4 focus:ring-emerald-500/5 outline-none transition-all placeholder:text-slate-400 dark:placeholder:text-slate-500 font-sans"
+                className="w-full pl-11 pr-4 py-3.5 text-sm font-semibold bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-2xl border border-slate-300 dark:border-slate-500 focus:border-emerald-500 dark:focus:border-emerald-400 focus:bg-emerald-50/20 dark:focus:bg-slate-900 focus:ring-4 focus:ring-emerald-500/15 outline-none transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400 font-sans"
               />
             </div>
             {/* Toolbar Buttons */}
             <div className="flex justify-between items-center gap-3">
                <div className="flex gap-2.5 overflow-x-auto no-scrollbar pr-2 py-0.5 w-full">
-                 <button onClick={() => setActiveCategory('all')} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${activeCategory === 'all' ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-500/20 scale-[1.02]' : 'bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-100 dark:border-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200'}`}>Todos</button>
+                 <button onClick={() => setActiveCategory('all')} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 ${activeCategory === 'all' ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg shadow-emerald-500/20 scale-[1.02]' : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100'}`}>Todos</button>
                  {CATEGORIES.map(cat => (
-                   <button key={cat} onClick={() => setActiveCategory(cat)} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 whitespace-nowrap ${activeCategory === cat ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-lg shadow-emerald-500/20 scale-[1.02]' : 'bg-slate-50 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-700 dark:hover:text-slate-200'}`}>{cat}</button>
+                   <button key={cat} onClick={() => setActiveCategory(cat)} className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all duration-300 whitespace-nowrap ${activeCategory === cat ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-lg shadow-emerald-500/20 scale-[1.02]' : 'bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100'}`}>{cat}</button>
                  ))}
                </div>
             </div>
@@ -1352,11 +1712,11 @@ export default function App() {
                >
                  {totalByCode?.length > 0 ? (
                    <div className="divide-y divide-slate-50 dark:divide-slate-700/50">
-                     {totalByCode.map((item) => {
+                     {totalByCode.map((item, idx) => {
                        const total = locations.reduce((sum, loc) => sum + (item.locs[loc] || 0), 0);
                        const isLowStock = total <= lowStockThreshold && total > 0;
                        return (
-                         <div key={item.code} onClick={() => setDetailBookCode(item.code)} className={`relative flex items-center p-4 hover:bg-slate-50/80 dark:hover:bg-slate-700/20 transition-colors cursor-pointer group ${isLowStock ? 'bg-orange-50/30 dark:bg-orange-500/5' : ''}`}>
+                         <div key={item.code ? `total-${item.code}` : `total-idx-${idx}`} onClick={() => setDetailBookCode(item.code)} className={`relative flex items-center p-4 hover:bg-slate-50/80 dark:hover:bg-slate-700/20 transition-colors cursor-pointer group ${isLowStock ? 'bg-orange-50/30 dark:bg-orange-500/5' : ''}`}>
                            <div className={`absolute left-0 top-0 bottom-0 w-[5px] ${getCatColor(item.category)} bg-opacity-90`} />
                            <div className="w-10 h-10 rounded-full bg-slate-50 dark:bg-slate-900 border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-400 shrink-0 ml-2">
                              {CAT_META[item.category]?.icon || <Book className="w-4 h-4 opacity-50" />}
@@ -1369,15 +1729,15 @@ export default function App() {
                              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate mt-0.5 tracking-wide">{item.code} • {item.category}</p>
                            </div>
                            <div className="flex flex-col items-end shrink-0 ml-1 mr-2">
-                              <span className={`text-[9px] uppercase font-bold tracking-wider ${isLowStock ? 'text-orange-500/80 dark:text-orange-400/80' : 'text-slate-400 dark:text-slate-500'}`}>Total</span>
-                              <span className={`text-lg leading-tight font-extrabold ${total === 0 ? 'text-rose-500' : (isLowStock ? 'text-orange-600 dark:text-orange-400' : 'text-slate-900 dark:text-slate-100')}`}>{total}</span>
+                              <span className={`text-[9px] uppercase font-bold tracking-wider ${isLowStock ? 'text-orange-600 dark:text-orange-300' : 'text-slate-500 dark:text-slate-300'}`}>Total</span>
+                              <span className={`text-lg leading-tight font-extrabold ${total === 0 ? 'text-rose-600 dark:text-rose-400' : (isLowStock ? 'text-orange-600 dark:text-orange-300' : 'text-slate-900 dark:text-slate-100')}`}>{total}</span>
                            </div>
                          </div>
                        );
                      })}
                    </div>
                  ) : (
-                   <div className="p-8 text-center text-slate-400 text-sm font-medium">Nenhum livro listado.</div>
+                   <div className="p-8 text-center text-slate-500 dark:text-slate-300 text-sm font-medium">Nenhum livro listado.</div>
                  )}
                </motion.div>
              ) : (
@@ -1390,14 +1750,14 @@ export default function App() {
                >
                  {filteredBooks.length > 0 ? (
                    <div className="divide-y divide-slate-50 dark:divide-slate-700/50">
-                     {filteredBooks.map((b) => {
+                     {filteredBooks.map((b, idx) => {
                        const avail = getAvail(b);
                        const isLowStock = avail <= lowStockThreshold && avail > 0;
                        const isAnimated = animatedBook?.id === b.id;
 
                        return (
                          <motion.div 
-                           key={b.id} 
+                           key={b.id || `book-${b.code}-${b.loc}-${idx}`} 
                            onClick={() => setDetailBookCode(b.code)} 
                            className={`relative flex flex-col p-4 hover:bg-slate-50/80 dark:hover:bg-slate-700/20 transition-colors group cursor-pointer ${isLowStock ? 'bg-orange-50/30 dark:bg-orange-500/5' : ''}`}
                            animate={isAnimated ? { scale: [1.02, 1] } : {}}
@@ -1406,6 +1766,7 @@ export default function App() {
                            <AnimatePresence>
                              {isAnimated && (
                                <motion.div
+                                 key={`flash-${b.id || idx}`}
                                  initial={{ opacity: 0.5 }}
                                  animate={{ opacity: 0 }}
                                  exit={{ opacity: 0 }}
@@ -1449,7 +1810,7 @@ export default function App() {
                                )}
                              </div>
                              <div className="flex flex-col items-end shrink-0 ml-1 mr-2">
-                                <span className={`text-[9px] uppercase font-bold tracking-wider ${isLowStock ? 'text-orange-500/80 dark:text-orange-400/80' : 'text-slate-400 dark:text-slate-500'}`}>Disp.</span>
+                                <span className={`text-[9px] uppercase font-bold tracking-wider ${isLowStock ? 'text-orange-600 dark:text-orange-300' : 'text-slate-500 dark:text-slate-300'}`}>Disp.</span>
                                 <motion.span 
                                   animate={isAnimated ? {
                                     scale: [1, 1.35, 0.95, 1.05, 1],
@@ -1461,16 +1822,16 @@ export default function App() {
                                   transition={{ duration: 0.8, ease: "easeInOut" }}
                                   className={`text-2xl leading-none font-black mt-1 inline-block origin-right transition-colors duration-300 ${
                                     isAnimated 
-                                      ? (animatedBook?.type === 'in' ? 'text-emerald-500 dark:text-emerald-400' : 'text-amber-500 dark:text-amber-400')
-                                      : (avail === 0 ? 'text-rose-500 text-shadow-sm' : (isLowStock ? 'text-orange-600 dark:text-orange-400' : 'text-slate-900 dark:text-slate-100'))
+                                      ? (animatedBook?.type === 'in' ? 'text-emerald-500 dark:text-emerald-300' : 'text-amber-500 dark:text-amber-300')
+                                      : (avail === 0 ? 'text-rose-600 dark:text-rose-400 text-shadow-sm' : (isLowStock ? 'text-orange-600 dark:text-orange-300' : 'text-slate-900 dark:text-slate-100'))
                                   }`}
                                 >
                                   {avail}
                                 </motion.span>
                                 <div className="flex items-center gap-1.5 mt-2 bg-slate-100/80 dark:bg-slate-800 px-2 py-0.5 rounded-md text-[9px] font-bold">
-                                  <span className="text-emerald-600 dark:text-emerald-400">+{b.in}</span>
-                                  <span className="text-slate-300 dark:text-slate-600">|</span>
-                                  <span className="text-orange-500 dark:text-orange-400">-{b.out}</span>
+                                  <span className="text-emerald-600 dark:text-emerald-300">+{b.in}</span>
+                                  <span className="text-slate-400 dark:text-slate-400">|</span>
+                                  <span className="text-orange-600 dark:text-orange-300">-{b.out}</span>
                                 </div>
                              </div>
                            </div>
@@ -1479,7 +1840,7 @@ export default function App() {
                      })}
                    </div>
                  ) : (
-                   <div className="p-8 text-center text-slate-400 text-sm font-medium">Nenhum livro listado nesta localização.</div>
+                   <div className="p-8 text-center text-slate-500 dark:text-slate-300 text-sm font-medium">Nenhum livro listado nesta localização.</div>
                  )}
                </motion.div>
              )}
@@ -1583,79 +1944,181 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <div className="space-y-1">
                     <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                      {darkMode ? <Moon className="w-4 h-4 text-indigo-500" /> : <Sun className="w-4 h-4 text-amber-500" />}
+                      {darkMode ? <Moon className="w-4 h-4 text-[#0d84ff]" /> : <Sun className="w-4 h-4 text-amber-500" />}
                       Aparência Visual
                     </h3>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Escolha um visual otimizado para a sua experiência de trabalho.
+                      Personalize a interface com um design elegante ao estilo do sistema operativo iOS.
                     </p>
                   </div>
-                  <span className={`text-[10px] uppercase font-black tracking-wider px-2.5 py-1 rounded-full ${darkMode ? 'bg-[#00897b]/10 text-[#00897b]' : 'bg-slate-100 text-slate-600'}`}>
-                    {darkMode ? 'Modo Escuro' : 'Modo Claro'}
+                  <span className={`text-[10px] uppercase font-black tracking-wider px-2.5 py-1 rounded-full ${autoTheme ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-200' : darkMode ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200'}`}>
+                    {autoTheme ? 'Automático' : darkMode ? 'Escuro' : 'Claro'}
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 pt-2">
-                  {/* Light Mode Selector Card */}
-                  <div 
-                    onClick={() => setDarkMode(false)}
-                    className={`relative flex flex-col gap-3 p-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 ${!darkMode ? (isLive ? 'border-[#00897b] bg-[#00897b]/5 shadow-md scale-[1.01]' : 'border-[#7b1fa2] bg-[#7b1fa2]/5 shadow-md scale-[1.01]') : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 hover:scale-[1.005]'}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/20">
-                        <Sun className="w-5 h-5 text-amber-500 animate-pulse" />
-                      </div>
-                      {!darkMode && (
-                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white ${isLive ? 'bg-[#00897b]' : 'bg-[#7b1fa2]'}`}>
-                          <Check className="w-3 h-3" />
+                {/* Previews side by side */}
+                <div className="flex items-center justify-center gap-6 sm:gap-12 pt-4 pb-2">
+                  
+                  {/* Light Representation Mockup */}
+                  <div className="flex flex-col items-center">
+                    <div 
+                      onClick={() => { setDarkMode(false); setAutoTheme(false); }}
+                      className={`w-28 h-48 sm:w-32 sm:h-56 rounded-[24px] border-[4px] p-1 transition-all duration-300 cursor-pointer active:scale-95 flex flex-col items-stretch overflow-hidden relative shadow-sm hover:shadow-md ${
+                        !darkMode && !autoTheme
+                          ? 'border-[#007aff] dark:border-[#0d84ff] ring-4 ring-blue-500/15 bg-white' 
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 hover:scale-[1.005]'
+                      }`}
+                    >
+                      <div className="flex-1 bg-slate-50 rounded-[18px] flex flex-col overflow-hidden relative border border-slate-200/50">
+                        {/* Notch */}
+                        <div className="w-8 h-2.5 bg-slate-900 rounded-b-md mx-auto z-10 absolute top-0 left-1/2 -translate-x-1/2" />
+                        {/* Battery & Wifi */}
+                        <div className="flex items-center justify-between px-2 pt-1 pb-0.5 text-[8px] font-bold text-slate-600 select-none">
+                          <span>09:41</span>
+                          <div className="flex items-center gap-0.5">
+                            <Wifi className="w-2 h-2 text-slate-600" />
+                            <Battery className="w-2.5 h-2 text-slate-600" />
+                          </div>
                         </div>
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">Tema Claro</span>
-                      <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 block">Ideal para ambientes iluminados</span>
-                    </div>
-                    {/* Visual mockup representation */}
-                    <div className="mt-1 h-12 rounded-lg bg-slate-100 border border-slate-200 p-2 flex flex-col gap-1 overflow-hidden pointer-events-none">
-                      <div className="h-2 w-1/2 bg-slate-300 rounded-sm" />
-                      <div className="h-1.5 w-full bg-slate-200 rounded-sm" />
-                      <div className="flex gap-1 mt-1">
-                        <div className="h-3 w-5 bg-emerald-100 border border-emerald-200 rounded" />
-                        <div className="h-3 w-7 bg-slate-200 rounded" />
+                        {/* Core layout mock */}
+                        <div className="flex-1 p-2 flex flex-col gap-1.5 pt-2">
+                          <div className="h-4 bg-white rounded-md shadow-[0_1px_2px_rgba(0,0,0,0.02)] border border-slate-200/40 p-1 flex items-center justify-between">
+                            <div className="w-4.5 h-1 bg-[#007aff] rounded-sm" />
+                            <div className="w-5 h-1 bg-slate-200 rounded-sm" />
+                          </div>
+                          <div className="bg-white rounded-lg shadow-[0_1px_2.5px_rgba(0,0,0,0.03)] border border-slate-200/30 p-1.5 flex flex-col gap-1 flex-1">
+                            <div className="h-1.5 w-1/2 bg-slate-300 rounded" />
+                            <div className="h-1 w-full bg-slate-200 rounded animate-pulse" />
+                            <div className="h-1 w-3/4 bg-slate-200 rounded" />
+                            <div className="mt-auto h-3 w-full bg-[#34c759]/15 rounded flex items-center justify-center">
+                              <div className="w-6 h-0.5 bg-[#34c759] rounded-full" />
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     </div>
+
+                    <button 
+                      type="button"
+                      onClick={() => { setDarkMode(false); setAutoTheme(false); }}
+                      className="mt-3.5 flex flex-col items-center gap-1.5 group cursor-pointer"
+                    >
+                      <div className={`w-[22px] h-[22px] rounded-full border-2 flex items-center justify-center transition-all ${
+                        !darkMode && !autoTheme 
+                          ? 'border-[#007aff] bg-[#007aff] text-white' 
+                          : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800'
+                      }`}>
+                        {!darkMode && !autoTheme && <Check className="w-3 h-3 stroke-[3.5]" />}
+                      </div>
+                      <span className={`text-[11px] font-bold tracking-wide ${
+                        !darkMode && !autoTheme ? 'text-[#007aff] dark:text-[#0d84ff]' : 'text-slate-500 dark:text-slate-400'
+                      }`}>
+                        Claro
+                      </span>
+                    </button>
                   </div>
 
-                  {/* Dark Mode Selector Card */}
-                  <div 
-                    onClick={() => setDarkMode(true)}
-                    className={`relative flex flex-col gap-3 p-4 rounded-2xl border-2 cursor-pointer transition-all duration-300 ${darkMode ? (isLive ? 'border-[#00897b] bg-[#00897b]/5 shadow-md scale-[1.01]' : 'border-[#7b1fa2] bg-[#7b1fa2]/5 shadow-md scale-[1.01]') : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 hover:scale-[1.005]'}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="p-2 rounded-xl bg-indigo-50 dark:bg-indigo-950/40">
-                        <Moon className="w-5 h-5 text-indigo-500 animate-pulse" />
-                      </div>
-                      {darkMode && (
-                        <div className={`w-5 h-5 rounded-full flex items-center justify-center text-white ${isLive ? 'bg-[#00897b]' : 'bg-[#7b1fa2]'}`}>
-                          <Check className="w-3 h-3" />
+                  {/* Dark Representation Mockup */}
+                  <div className="flex flex-col items-center">
+                    <div 
+                      onClick={() => { setDarkMode(true); setAutoTheme(false); }}
+                      className={`w-28 h-48 sm:w-32 sm:h-56 rounded-[24px] border-[4px] p-1 transition-all duration-300 cursor-pointer active:scale-95 flex flex-col items-stretch overflow-hidden relative shadow-sm hover:shadow-md ${
+                        darkMode && !autoTheme
+                          ? 'border-[#0d84ff] dark:border-[#0d84ff] ring-4 ring-blue-500/15 bg-slate-900' 
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 hover:scale-[1.005]'
+                      }`}
+                    >
+                      <div className="flex-1 bg-slate-950 rounded-[18px] flex flex-col overflow-hidden relative border border-slate-900/50">
+                        {/* Notch */}
+                        <div className="w-8 h-2.5 bg-slate-900 rounded-b-md mx-auto z-10 absolute top-0 left-1/2 -translate-x-1/2" />
+                        {/* Battery & Wifi */}
+                        <div className="flex items-center justify-between px-2 pt-1 pb-0.5 text-[8px] font-bold text-slate-400 select-none">
+                          <span>09:41</span>
+                          <div className="flex items-center gap-0.5">
+                            <Wifi className="w-2 h-2 text-slate-400" />
+                            <Battery className="w-2.5 h-2 text-slate-400" />
+                          </div>
                         </div>
-                      )}
-                    </div>
-                    <div>
-                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">Tema Escuro</span>
-                      <span className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 block">Nítido, excelente para repouso visual</span>
-                    </div>
-                    {/* Visual mockup representation */}
-                    <div className="mt-1 h-12 rounded-lg bg-slate-900 border border-slate-800 p-2 flex flex-col gap-1 overflow-hidden pointer-events-none">
-                      <div className="h-2 w-1/4 bg-slate-700 rounded-sm" />
-                      <div className="h-1.5 w-3/4 bg-slate-800 rounded-sm" />
-                      <div className="flex gap-1 mt-1">
-                        <div className="h-3 w-5 bg-slate-800 border border-slate-700 rounded" />
-                        <div className="h-3 w-7 bg-emerald-950 border border-emerald-900 rounded" />
+                        {/* Core layout mock */}
+                        <div className="flex-1 p-2 flex flex-col gap-1.5 pt-2">
+                          <div className="h-4 bg-slate-900 rounded-md shadow-[0_1px_2px_rgba(0,0,0,0.1)] border border-slate-800/80 p-1 flex items-center justify-between">
+                            <div className="w-4.5 h-1 bg-[#0d84ff] rounded-sm" />
+                            <div className="w-5 h-1 bg-slate-700 rounded-sm" />
+                          </div>
+                          <div className="bg-slate-900 rounded-lg shadow-[0_1px_2.5px_rgba(0,0,0,0.2)] border border-slate-800 p-1.5 flex flex-col gap-1 flex-1">
+                            <div className="h-1.5 w-1/2 bg-slate-600 rounded" />
+                            <div className="h-1 w-full bg-slate-800 rounded animate-pulse" />
+                            <div className="h-1 w-3/4 bg-slate-800 rounded" />
+                            <div className="mt-auto h-3 w-full bg-[#30d158]/20 rounded flex items-center justify-center">
+                              <div className="w-6 h-0.5 bg-[#30d158] rounded-full" />
+                            </div>
+                          </div>
+                        </div>
                       </div>
+                    </div>
+
+                    <button 
+                      type="button"
+                      onClick={() => { setDarkMode(true); setAutoTheme(false); }}
+                      className="mt-3.5 flex flex-col items-center gap-1.5 group cursor-pointer"
+                    >
+                      <div className={`w-[22px] h-[22px] rounded-full border-2 flex items-center justify-center transition-all ${
+                        darkMode && !autoTheme 
+                          ? 'border-[#007aff] bg-[#007aff] text-white' 
+                          : 'border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800'
+                      }`}>
+                        {darkMode && !autoTheme && <Check className="w-3 h-3 stroke-[3.5]" />}
+                      </div>
+                      <span className={`text-[11px] font-bold tracking-wide ${
+                        darkMode && !autoTheme ? 'text-[#007aff] dark:text-[#0d84ff]' : 'text-slate-500 dark:text-slate-400'
+                      }`}>
+                        Escuro
+                      </span>
+                    </button>
+                  </div>
+
+                </div>
+
+                {/* Grouped iOS List Options */}
+                <div className="bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800/80 divide-y divide-slate-200/70 dark:divide-slate-800 overflow-hidden mt-2">
+                  <div className="flex items-center justify-between p-4 bg-transparent">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-lg bg-orange-500 flex items-center justify-center shrink-0 shadow-sm shadow-orange-500/10">
+                        <Sun className="w-4.5 h-4.5 text-white" />
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-xs font-bold text-slate-800 dark:text-slate-100 block">
+                          Automático
+                        </span>
+                        <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">
+                          Alternar automaticamente com base nas definições do sistema
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* iOS Toggle Switch */}
+                    <div 
+                      onClick={() => setAutoTheme(!autoTheme)}
+                      className={`w-12 h-7 rounded-full p-[2px] transition-colors duration-250 ease-in-out cursor-pointer relative shrink-0 ${
+                        autoTheme 
+                          ? 'bg-[#34c759] dark:bg-[#30d158]' 
+                          : 'bg-slate-200 dark:bg-slate-700'
+                      }`}
+                      id="ios-appearance-auto-switch"
+                    >
+                      <motion.div 
+                        layout
+                        className="w-6 h-6 bg-white rounded-full shadow absolute top-[2px]"
+                        style={{ left: autoTheme ? '22px' : '2px' }}
+                        transition={{ type: "spring", stiffness: 450, damping: 28 }}
+                      />
                     </div>
                   </div>
                 </div>
+
+                <p className="text-[10px] text-slate-500 dark:text-slate-300 leading-relaxed pl-1">
+                  Ative o modo automático para que a aplicação siga o esquema claro/escuro nativo do seu dispositivo operacional em tempo real.
+                </p>
               </div>
 
               {/* User Profile Section */}
@@ -1695,70 +2158,130 @@ export default function App() {
                         </div>
                         
                         <div className="space-y-1.5 min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-base font-extrabold text-slate-800 dark:text-slate-100 truncate tracking-tight">
-                              {user.displayName || 'Operador Local'}
-                            </span>
-                            
-                            {/* Role Badge with visual pill styling */}
-                            {isAdmin ? (
-                              <span className="px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-300/30 text-amber-600 dark:text-amber-400 font-extrabold text-[9px] uppercase tracking-widest flex items-center gap-1 shrink-0 shadow-sm">
-                                <Shield className="w-2.5 h-2.5" /> Proprietário (Admin)
+                          {isEditingName ? (
+                            <div className="space-y-2">
+                              {nameUpdateLoading ? (
+                                <div className="flex items-center gap-2 text-xs font-bold text-[#00897b] dark:text-emerald-400 py-2">
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                  A gravar alterações...
+                                </div>
+                              ) : (
+                                <div className="space-y-2 max-w-[240px]">
+                                  <input
+                                    type="text"
+                                    value={newDisplayName}
+                                    onChange={(e) => setNewDisplayName(e.target.value)}
+                                    placeholder="Nome do utilizador"
+                                    className="px-3 py-1.5 border border-slate-300 dark:border-slate-500 bg-white dark:bg-slate-900 rounded-xl text-xs font-bold text-slate-900 dark:text-slate-100 placeholder:text-slate-500 dark:placeholder:text-slate-400 focus:ring-2 focus:ring-[#00897b]/30 focus:border-[#00897b] dark:focus:border-emerald-400 outline-none w-full shadow-sm"
+                                    maxLength={30}
+                                    autoFocus
+                                  />
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!newDisplayName.trim()) {
+                                          showToast('O nome não pode estar vazio.');
+                                          return;
+                                        }
+                                        if (newDisplayName.trim() === user.displayName) {
+                                          setIsEditingName(false);
+                                          return;
+                                        }
+                                        setPendingNameUpdate(newDisplayName.trim());
+                                        setPinActionType('updateName');
+                                        setShowPinDialog(true);
+                                      }}
+                                      className="px-3 py-1 bg-[#00897b] dark:bg-emerald-600 hover:bg-[#00796b] dark:hover:bg-emerald-500 text-white font-extrabold rounded-lg text-[9px] uppercase tracking-wider transition-all cursor-pointer shadow-sm active:scale-95"
+                                    >
+                                      Concluir
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setIsEditingName(false);
+                                        setNewDisplayName('');
+                                      }}
+                                      className="px-3 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 font-extrabold rounded-lg text-[9px] uppercase tracking-wider transition-all cursor-pointer active:scale-95"
+                                    >
+                                      Cancelar
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-base font-extrabold text-slate-800 dark:text-slate-100 truncate tracking-tight">
+                                  {user.displayName || 'Operador Local'}
+                                </span>
+                                
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setNewDisplayName(user.displayName || '');
+                                    setIsEditingName(true);
+                                  }}
+                                  className="p-1 text-slate-400 hover:text-[#00897b] dark:hover:text-emerald-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all cursor-pointer active:scale-90"
+                                  title="Trocar nome do usuário"
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                
+                                {/* Role Badge with visual pill styling */}
+                                {currentUserRole === 'admin' ? (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-300/30 text-amber-600 dark:text-amber-400 font-extrabold text-[9px] uppercase tracking-widest flex items-center gap-1 shrink-0 shadow-sm">
+                                    <Shield className="w-2.5 h-2.5" /> Administrador (Admin)
+                                  </span>
+                                ) : currentUserRole === 'operator' ? (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-300/30 text-emerald-600 dark:text-emerald-400 font-extrabold text-[9px] uppercase tracking-widest flex items-center gap-1 shrink-0 font-sans shadow-sm">
+                                    <Users className="w-2.5 h-2.5" /> Operador Autorizado
+                                  </span>
+                                ) : (
+                                  <span className="px-2.5 py-0.5 rounded-full bg-slate-400/15 border border-slate-300/40 dark:border-slate-600 text-slate-600 dark:text-slate-300 font-extrabold text-[9px] uppercase tracking-widest flex items-center gap-1 shrink-0 font-sans shadow-sm">
+                                    <Users className="w-2.5 h-2.5" /> Colaborador (Visualização)
+                                  </span>
+                                )}
+                              </div>
+                              
+                              <span className="text-xs text-slate-600 dark:text-slate-300 font-medium truncate block tracking-wide">
+                                {user.email}
                               </span>
-                            ) : (
-                              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-300/30 text-emerald-600 dark:text-emerald-400 font-extrabold text-[9px] uppercase tracking-widest flex items-center gap-1 shrink-0 font-sans shadow-sm">
-                                <Users className="w-2.5 h-2.5" /> Colaborador (Operador)
-                              </span>
-                            )}
-                          </div>
-                          
-                          <span className="text-xs text-slate-500 dark:text-slate-400 font-medium truncate block tracking-wide">
-                            {user.email}
-                          </span>
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       {/* Connection status card right side */}
-                      <div className="z-10 bg-white/70 dark:bg-slate-800/60 backdrop-blur-sm p-3 px-4 rounded-xl border border-slate-200/50 dark:border-slate-800 flex items-center md:flex-col md:items-end justify-between md:justify-center gap-2 self-stretch md:self-auto shadow-sm">
-                        <div className="text-[9px] text-slate-400 dark:text-slate-500 font-black tracking-widest uppercase mb-0.5">Estado do Terminal</div>
+                      <div className="z-10 bg-white/70 dark:bg-slate-800/80 backdrop-blur-sm p-3 px-4 rounded-xl border border-slate-200/50 dark:border-slate-700 flex items-center md:flex-col md:items-end justify-between md:justify-center gap-2 self-stretch md:self-auto shadow-sm">
+                        <div className="text-[9px] text-slate-500 dark:text-slate-300 font-black tracking-widest uppercase mb-0.5">Estado do Terminal</div>
                         <div className="flex items-center gap-1.5">
                           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping absolute" />
                           <span className="w-2 h-2 rounded-full bg-emerald-500 relative" />
-                          <span className="text-xs font-extrabold text-[#00897b] dark:text-emerald-400">Ligado e Sincronizado</span>
+                          <span className="text-xs font-extrabold text-[#00897b] dark:text-emerald-300">Ligado e Sincronizado</span>
                         </div>
                       </div>
                     </div>
 
                     {/* Permission and Active Roles checklist */}
-                    <div className="p-4.5 bg-slate-50/50 dark:bg-slate-900/40 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 space-y-3">
-                      <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block border-b border-slate-200/45 dark:border-slate-800 pb-2">Matriz de Autorizações Ativas</span>
+                    <div className="p-4.5 bg-slate-50/50 dark:bg-slate-900/60 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 space-y-3">
+                      <span className="text-[10px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest block border-b border-slate-200/45 dark:border-slate-700 pb-2">Matriz de Autorizações Ativas</span>
                       
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-0.5">
                         <div className="flex items-start gap-2.5">
                           <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
                           <div className="space-y-0.5">
-                            <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Registo de Movimentos</span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 block leading-tight">Lançar entradas e saídas de livros no inventário corrente</span>
+                            <span className="text-xs font-bold text-slate-700 dark:text-slate-100">Registo de Movimentos</span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">Lançar entradas e saídas de livros no inventário corrente</span>
                           </div>
                         </div>
 
-                        <div className="flex items-start gap-2.5">
-                          <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                        <div className="flex items-start gap-2.5 opacity-75">
+                          <Lock className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400 mt-1 shrink-0" />
                           <div className="space-y-0.5">
-                            <span className="text-xs font-bold text-slate-700 dark:text-slate-200">Exportar Relatórios</span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 block leading-tight">Gerar salvaguardas em formato de backups JSON e folhas CSV</span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-start gap-2.5">
-                          {isAdmin ? (
-                            <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
-                          ) : (
-                            <Lock className="w-3.5 h-3.5 text-slate-400 mt-1 shrink-0" />
-                          )}
-                          <div className="space-y-0.5">
-                            <span className={`text-xs font-bold ${isAdmin ? 'text-slate-700 dark:text-slate-200' : 'text-slate-400'}`}>Administração de Locais</span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 block leading-tight">Configurar endereços de stock e locais físicos de armazenamento</span>
+                            <span className="text-xs font-bold text-slate-500 dark:text-slate-300 line-through">Exportar Relatórios</span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">Opção de exportar e importar backups desativada</span>
                           </div>
                         </div>
 
@@ -1766,11 +2289,23 @@ export default function App() {
                           {isAdmin ? (
                             <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
                           ) : (
-                            <Lock className="w-3.5 h-3.5 text-slate-400 mt-1 shrink-0" />
+                            <Lock className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400 mt-1 shrink-0" />
                           )}
                           <div className="space-y-0.5">
-                            <span className={`text-xs font-bold ${isAdmin ? 'text-slate-700 dark:text-slate-200' : 'text-slate-400'}`}>Controlo de Segurança</span>
-                            <span className="text-[10px] text-slate-400 dark:text-slate-500 block leading-tight">Configurar chaves de PIN e gerir acessos globais de segurança</span>
+                            <span className={`text-xs font-bold ${isAdmin ? 'text-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-300'}`}>Administração de Locais</span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">Configurar endereços de stock e locais físicos de armazenamento</span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2.5">
+                          {isAdmin ? (
+                            <Check className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
+                          ) : (
+                            <Lock className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400 mt-1 shrink-0" />
+                          )}
+                          <div className="space-y-0.5">
+                            <span className={`text-xs font-bold ${isAdmin ? 'text-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-300'}`}>Controlo de Segurança</span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">Configurar chaves de PIN e gerir acessos globais de segurança</span>
                           </div>
                         </div>
                       </div>
@@ -1778,29 +2313,31 @@ export default function App() {
 
                     {/* Metadata & Permissions guide board */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="p-3.5 bg-slate-50/50 dark:bg-slate-900/40 rounded-xl border border-slate-200/80 dark:border-slate-800/80 space-y-1">
-                        <span className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Licença de Permissões</span>
-                        <p className="text-[11px] text-slate-505 dark:text-slate-400 leading-normal">
-                          {isAdmin 
+                      <div className="p-3.5 bg-slate-50/50 dark:bg-slate-900/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-1">
+                        <span className="text-[9px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest block">Licença de Permissões</span>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-normal">
+                          {currentUserRole === 'admin' 
                             ? 'Acesso administrativo total. Autorizado a gerir configurações globais de locais de stock, alterar o PIN administrativo de segurança e descarregar salvaguardas da Cloud.' 
-                            : 'Acesso padrão de operador. Autorizado a registar entradas e saídas de literatura, criar listagens e atualizar o inventário corrente.'
+                            : currentUserRole === 'operator'
+                              ? 'Acesso padrão de operador. Autorizado a registar entradas e saídas de literatura, criar listagens e atualizar o inventário corrente nas localizações permitidas.'
+                              : 'Acesso de colaborador (apenas visualização). Pode navegar nos dados e gráficos, mas não está autorizado a realizar inserções, edições ou eliminações de stock.'
                           }
                         </p>
                       </div>
 
-                      <div className="p-3.5 bg-slate-50/50 dark:bg-slate-900/40 rounded-xl border border-slate-200/80 dark:border-slate-800/80 space-y-1">
-                        <span className="text-[9px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Ambiente da Base de Dados</span>
-                        <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-normal space-y-1">
+                      <div className="p-3.5 bg-slate-50/50 dark:bg-slate-900/60 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-1">
+                        <span className="text-[9px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest block">Ambiente da Base de Dados</span>
+                        <div className="text-[11px] text-slate-600 dark:text-slate-300 leading-normal space-y-1">
                           <div className="flex justify-between items-center">
                             <span>Workspace:</span>
-                            <span className="font-bold text-slate-700 dark:text-slate-300 font-mono text-[10px] bg-slate-200/50 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                            <span className="font-bold text-slate-700 dark:text-slate-200 font-mono text-[10px] bg-slate-200/50 dark:bg-slate-800 px-1.5 py-0.5 rounded">
                               global_workspace
                             </span>
                           </div>
                           <div className="flex justify-between items-center">
                             <span>Nível de Acesso:</span>
-                            <span className="font-bold text-[#00897b] dark:text-emerald-400">
-                              {isAdmin ? 'Super-Admin' : 'Operador Autorizado'}
+                            <span className="font-bold text-[#00897b] dark:text-emerald-300">
+                              {currentUserRole === 'admin' ? 'Super-Admin' : currentUserRole === 'operator' ? 'Operador Autorizado' : 'Colaborador (Visualização)'}
                             </span>
                           </div>
                         </div>
@@ -1813,7 +2350,7 @@ export default function App() {
                           await logout();
                           showToast('Sessão encerrada de forma segura.');
                         }}
-                        className="w-full py-3 bg-white dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-955/15 border border-slate-200 dark:border-slate-700/80 hover:border-rose-200 dark:hover:border-rose-900/35 text-slate-700 dark:text-slate-300 hover:text-rose-600 dark:hover:text-rose-400 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm cursor-pointer active:scale-[0.99] flex items-center justify-center gap-1.5"
+                        className="w-full py-3 bg-white dark:bg-slate-800 hover:bg-rose-50 dark:hover:bg-rose-950/30 border border-slate-200 dark:border-slate-700 hover:border-rose-200 dark:hover:border-rose-800/60 text-slate-700 dark:text-slate-200 hover:text-rose-600 dark:hover:text-rose-300 font-bold rounded-xl text-xs uppercase tracking-wider transition-all shadow-sm cursor-pointer active:scale-[0.99] flex items-center justify-center gap-1.5"
                       >
                         <LogOut className="w-4 h-4" /> Terminar Sessão de Forma Segura
                       </button>
@@ -1822,397 +2359,494 @@ export default function App() {
                 )}
               </div>
 
-              {/* Low Stock Threshold */}
-              <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                    <Bell className="w-4 h-4 text-rose-500" />
-                    Alertas de Stock Baixo
-                  </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    Livros com quantidade igual ou inferior a este limiar serão destacados no painel.
-                  </p>
-                </div>
+              {/* Low Stock Threshold (iOS Style) */}
+              {(() => {
+                const isAlertsOn = lowStockThreshold > 0;
+                
+                const handleToggleAlerts = () => {
+                  if (isAlertsOn) {
+                    setLowStockThreshold(0);
+                  } else {
+                    setLowStockThreshold(lastActiveThreshold);
+                  }
+                };
 
-                <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2 bg-rose-50 dark:bg-rose-950/20 rounded-xl">
-                      <AlertTriangle className="w-5 h-5 text-rose-500" />
+                return (
+                  <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
+                    <div className="flex items-center gap-2 px-1 mb-1">
+                      <Bell className="w-4 h-4 text-rose-500" />
+                      <span className="text-[11px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest">
+                        Notificações de Stock
+                      </span>
                     </div>
-                    <div>
-                      <span className="text-xs font-bold text-slate-700 dark:text-slate-300">Quantidade Alerta</span>
-                      <p className="text-[10px] text-slate-400">Limite crítico de stock</p>
+
+                    <div className="bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 overflow-hidden divide-y divide-slate-200/70 dark:divide-slate-800">
+                      {/* Switch Row */}
+                      <div className="flex items-center justify-between p-4 bg-transparent">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-rose-500 flex items-center justify-center shrink-0 shadow-sm shadow-rose-500/20">
+                            <Bell className="w-4.5 h-4.5 text-white" />
+                          </div>
+                          <div className="space-y-0.5">
+                            <span className="text-xs font-bold text-slate-800 dark:text-slate-100 block">
+                              Alertas Ativos
+                            </span>
+                            <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">
+                              Sinalizar livros com inventário crítico
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* iOS Toggle Switch */}
+                        <div 
+                          onClick={handleToggleAlerts}
+                          className={`w-12 h-7 rounded-full p-[2px] transition-colors duration-250 ease-in-out cursor-pointer relative shrink-0 ${
+                            isAlertsOn 
+                              ? 'bg-[#34c759] dark:bg-[#30d158]' 
+                              : 'bg-slate-200 dark:bg-slate-700'
+                          }`}
+                          id="ios-alerts-switch"
+                        >
+                          <motion.div 
+                            layout
+                            className="w-6 h-6 bg-white rounded-full shadow absolute top-[2px]"
+                            style={{ left: isAlertsOn ? '22px' : '2px' }}
+                            transition={{ type: "spring", stiffness: 450, damping: 28 }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Stepper Row */}
+                      <div className={`p-4 bg-transparent transition-all duration-200 ${
+                        isAlertsOn 
+                          ? 'opacity-100' 
+                          : 'opacity-40 bg-slate-100/10 dark:bg-slate-950/5 select-none pointer-events-none'
+                      }`}>
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-sm transition-colors ${
+                              isAlertsOn 
+                                ? 'bg-amber-500 text-white shadow-amber-500/10' 
+                                : 'bg-slate-200 text-slate-500 dark:bg-slate-800 dark:text-slate-400'
+                            }`}>
+                              <AlertTriangle className="w-4.5 h-4.5" />
+                            </div>
+                            <div className="space-y-0.5">
+                              <span className="text-xs font-bold text-slate-800 dark:text-slate-100 block">
+                                Quantidade Alerta
+                              </span>
+                              <span className="text-[10px] text-slate-500 dark:text-slate-300 block leading-tight">
+                                Assinalar se for igual ou abaixo de:
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3.5 justify-end">
+                            {/* Value Display */}
+                            <div className="text-right py-0.5 px-2 bg-slate-100 dark:bg-slate-800/80 rounded-lg min-w-[54px]">
+                              <span className={`text-sm font-extrabold font-mono ${
+                                isAlertsOn ? 'text-[#007aff] dark:text-[#38bdf8]' : 'text-slate-400 dark:text-slate-300'
+                              }`}>
+                                {isAlertsOn ? lowStockThreshold : 0}
+                              </span>
+                              <span className="text-[9px] font-bold text-slate-500 dark:text-slate-300 ml-0.5">
+                                unid.
+                              </span>
+                            </div>
+
+                            {/* iOS Stepper Buttons */}
+                            <div className="flex items-center bg-slate-200/50 dark:bg-slate-800 p-0.5 rounded-lg border border-slate-200/60 dark:border-slate-700/60 overflow-hidden">
+                              <button 
+                                type="button"
+                                disabled={!isAlertsOn}
+                                onClick={() => {
+                                  const newVal = Math.max(1, lowStockThreshold - 1);
+                                  setLowStockThreshold(newVal);
+                                  setLastActiveThreshold(newVal);
+                                }}
+                                className="w-7 h-7 flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 rounded-md text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer disabled:opacity-20"
+                                title="Diminuir"
+                              >
+                                <Minus className="w-3.5 h-3.5" />
+                              </button>
+                              
+                              <div className="w-[1px] h-3.5 bg-slate-300 dark:bg-slate-600 mx-0.5" />
+                              
+                              <button 
+                                type="button"
+                                disabled={!isAlertsOn}
+                                onClick={() => {
+                                  const newVal = Math.min(100, lowStockThreshold + 1);
+                                  setLowStockThreshold(newVal);
+                                  setLastActiveThreshold(newVal);
+                                }}
+                                className="w-7 h-7 flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 rounded-md text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer disabled:opacity-20"
+                                title="Aumentar"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="text-[10px] text-slate-500 dark:text-slate-300 leading-relaxed pl-1.5">
+                      Sinalizações visuais cor-de-laranja serão exibidas nas tabelas se existirem livros com stock crítico de inventário.
+                    </p>
+
+                    {/* Sincronizar Button */}
+                    <div className="flex justify-end pt-1">
+                      <motion.button
+                        whileTap={{ scale: 0.98 }}
+                        onClick={async () => {
+                          if (savingLowStock) return;
+                          setSavingLowStock(true);
+                          setSavedLowStock(false);
+                          try {
+                            await Promise.race([
+                              updateWorkspaceSettings(locations, lowStockThreshold),
+                              new Promise((resolve) => setTimeout(() => resolve(true), 1550))
+                            ]);
+                            setSavedLowStock(true);
+                            showToast('Alterações de stock sincronizadas com sucesso!');
+                            setTimeout(() => setSavedLowStock(false), 3500);
+                          } catch (err: any) {
+                            console.warn("Storage settings sync error or timeout, saved locally:", err);
+                            setSavedLowStock(true);
+                            showToast('Definições atualizadas com sucesso localmente!');
+                            setTimeout(() => setSavedLowStock(false), 3500);
+                          } finally {
+                            setSavingLowStock(false);
+                          }
+                        }}
+                        className={`px-5 py-2.5 rounded-2xl text-xs font-bold shadow-sm transition-all flex items-center gap-2 cursor-pointer ${
+                          savedLowStock 
+                            ? 'bg-emerald-600 dark:bg-emerald-700 text-white hover:bg-emerald-700' 
+                            : isLive
+                              ? 'bg-[#00897b] hover:bg-[#00796b] text-white shadow-[#00897b]/10'
+                              : 'bg-[#7b1fa2] hover:bg-[#6a1b9b] text-white shadow-[#7b1fa2]/10'
+                        }`}
+                      >
+                        {savingLowStock ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                            A aplicar...
+                          </>
+                        ) : savedLowStock ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-white" />
+                            Guardado na Nuvem!
+                          </>
+                        ) : (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-white" />
+                            Aplicar e Sincronizar
+                          </>
+                        )}
+                      </motion.button>
                     </div>
                   </div>
-
-                  {/* Stepper Input */}
-                  <div className="flex items-center bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-1 shadow-sm">
-                    <button 
-                      type="button"
-                      onClick={() => setLowStockThreshold(prev => Math.max(0, prev - 1))}
-                      className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-600 dark:text-slate-300 font-bold active:scale-95 cursor-pointer"
-                    >
-                      <Minus className="w-3.5 h-3.5" />
-                    </button>
-                    
-                    <input 
-                      type="number" 
-                      min="0"
-                      max="100"
-                      value={lowStockThreshold}
-                      onChange={(e) => setLowStockThreshold(Math.max(0, parseInt(e.target.value) || 0))}
-                      className="w-14 text-center bg-transparent text-sm font-bold text-slate-800 dark:text-slate-100 outline-none hover:bg-slate-50 dark:hover:bg-slate-800/50 rounded-md py-1 transition-colors select-all"
-                    />
-                    
-                    <button 
-                      type="button"
-                      onClick={() => setLowStockThreshold(prev => prev + 1)}
-                      className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-600 dark:text-slate-300 font-bold active:scale-95 cursor-pointer"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                {/* Save button with dynamic state feedback */}
-                <div className="flex justify-end pt-1">
-                  <motion.button
-                    whileTap={{ scale: 0.98 }}
-                    onClick={async () => {
-                      if (savingLowStock) return;
-                      setSavingLowStock(true);
-                      setSavedLowStock(false);
-                      try {
-                        await Promise.race([
-                          updateWorkspaceSettings(locations, lowStockThreshold),
-                          new Promise((resolve) => setTimeout(() => resolve(true), 1500))
-                        ]);
-                        setSavedLowStock(true);
-                        showToast('Limiar de stock atualizado com sucesso!');
-                        setTimeout(() => setSavedLowStock(false), 3500);
-                      } catch (err: any) {
-                        console.warn("Storage settings sync error or timeout, saved locally:", err);
-                        setSavedLowStock(true);
-                        showToast('Definições atualizadas com sucesso localmente!');
-                        setTimeout(() => setSavedLowStock(false), 3500);
-                      } finally {
-                        setSavingLowStock(false);
-                      }
-                    }}
-                    className={`px-5 py-2.5 rounded-xl text-xs font-bold shadow-md transition-all flex items-center gap-2 cursor-pointer ${
-                      savedLowStock 
-                        ? 'bg-emerald-600 dark:bg-emerald-700 text-white hover:bg-emerald-700' 
-                        : isLive
-                          ? 'bg-[#00897b] hover:bg-[#00796b] text-white shadow-[#00897b]/10'
-                          : 'bg-[#7b1fa2] hover:bg-[#6a1b9b] text-white shadow-[#7b1fa2]/10'
-                    }`}
-                  >
-                    {savingLowStock ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin text-white" />
-                        A Guardar...
-                      </>
-                    ) : savedLowStock ? (
-                      <>
-                        <Check className="w-4 h-4 text-white" />
-                        Gravado com Sucesso!
-                      </>
-                    ) : (
-                      <>
-                        <Check className="w-4 h-4 text-white" />
-                        Gravar Limiar
-                      </>
-                    )}
-                  </motion.button>
-                </div>
-              </div>
+                );
+              })()}
 
               {/* Central de Cópias de Segurança */}
-              <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                    <Database className="w-4.5 h-4.5 text-[#00897b]" />
-                    Cópias de Segurança
-                  </h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    Proteja as suas informações mantendo salvaguardas automatizadas e integradas diretamente no Supabase PostgreSQL.
-                  </p>
-                </div>
+              {isAdmin && (
+                <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                      <Database className="w-4.5 h-4.5 text-[#00897b]" />
+                      Cópias de Segurança
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                      Proteja as suas informações mantendo salvaguardas automatizadas e integradas diretamente no Supabase PostgreSQL.
+                    </p>
+                  </div>
 
-                <div className="pt-1">
-                  {/* Cloud Backup Control */}
-                  <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 flex flex-col justify-between space-y-3">
-                    <div className="flex items-start justify-between gap-2.5">
-                      <div className="space-y-0.5">
-                        <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Cópia Semanal na Cloud</span>
-                        <p className="text-[10px] text-slate-500 leading-tight">Sincroniza automaticamente a base de dados centralizada no Supabase PostgreSQL.</p>
+                  <div className="pt-1">
+                    {/* Cloud Backup Control */}
+                    <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 flex flex-col justify-between space-y-3">
+                      <div className="flex items-start justify-between gap-2.5">
+                        <div className="space-y-0.5">
+                          <span className="text-xs font-bold text-slate-800 dark:text-slate-100">Cópia Semanal na Cloud</span>
+                          <p className="text-[10px] text-slate-600 dark:text-slate-300 leading-tight">Sincroniza automaticamente a base de dados centralizada no Supabase PostgreSQL.</p>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input 
+                            type="checkbox" 
+                            checked={autoCloudBackupEnabled}
+                            onChange={(e) => setAutoCloudBackupEnabled(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-slate-200 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#00897b]"></div>
+                        </label>
                       </div>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input 
-                          type="checkbox" 
-                          checked={autoCloudBackupEnabled}
-                          onChange={(e) => setAutoCloudBackupEnabled(e.target.checked)}
-                          className="sr-only peer"
-                        />
-                        <div className="w-9 h-5 bg-slate-200 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#00897b]"></div>
-                      </label>
+
+                      {autoCloudBackupEnabled && (
+                        <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="pt-2 border-t border-slate-200/55 dark:border-slate-800">
+                          <button
+                            onClick={() => setShowConfirmCloudBackup(true)}
+                            className="w-full py-2 bg-gradient-to-r from-cyan-600 to-[#00897b] text-white font-bold rounded-xl text-[10px] uppercase tracking-wider hover:opacity-95 active:scale-[0.99] transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
+                          >
+                            <Cloud className="w-3.5 h-3.5 text-white" /> Iniciar Backup Manual
+                          </button>
+                        </motion.div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Cloud Backups Snapshot List integrated */}
+                  <div className="mt-2 border-t border-slate-200/40 dark:border-slate-800 pt-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <h4 className="text-[11px] uppercase font-black tracking-widest text-[#00897b] dark:text-emerald-300">Histórico de Cópias Ativas</h4>
+                        <p className="text-[10px] text-slate-600 dark:text-slate-300">Pontos de restauração atualmente salvaguardados em nuvem.</p>
+                      </div>
+                      <button 
+                        onClick={fetchCloudBackups} 
+                        disabled={loadingBackups}
+                        className="p-1.5 px-3 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-200 text-[10px] font-bold rounded-xl border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${loadingBackups ? 'animate-spin' : ''}`} />
+                        Sincronizar
+                      </button>
                     </div>
 
-                    {autoCloudBackupEnabled && (
-                      <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} className="pt-2 border-t border-slate-200/55 dark:border-slate-800">
-                        <button
-                          onClick={() => setShowConfirmCloudBackup(true)}
-                          className="w-full py-2 bg-gradient-to-r from-cyan-600 to-[#00897b] text-white font-bold rounded-xl text-[10px] uppercase tracking-wider hover:opacity-95 active:scale-[0.99] transition-all shadow-sm flex items-center justify-center gap-1.5 cursor-pointer"
-                        >
-                          <Cloud className="w-3.5 h-3.5 text-white" /> Iniciar Backup Manual
-                        </button>
-                      </motion.div>
+                    {loadingBackups ? (
+                      <div className="flex flex-col items-center justify-center py-10 space-y-2 text-slate-500 dark:text-slate-300">
+                        <RefreshCw className="w-5 h-5 animate-spin text-[#00897b] dark:text-emerald-400" />
+                        <span className="text-[10px] font-bold uppercase tracking-wider">A verificar Supabase...</span>
+                      </div>
+                    ) : cloudBackupsList.length > 0 ? (
+                      <div className="space-y-2.5 max-h-[220px] overflow-y-auto pr-1">
+                        {cloudBackupsList.map((backup, idx) => {
+                          let bkBooks = 0;
+                          let bkHistories = 0;
+                          try {
+                            const p = JSON.parse(backup.payload);
+                            bkBooks = p.books?.length || 0;
+                            bkHistories = Object.keys(p.history || {}).length || 0;
+                          } catch (e) {}
+
+                          return (
+                            <div 
+                              key={backup.id || `backup-settings-${idx}`} 
+                              className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-none hover:shadow-sm transition-all"
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <div className="w-8 h-8 rounded-xl bg-cyan-50 dark:bg-cyan-950/30 text-cyan-600 dark:text-cyan-300 flex items-center justify-center shrink-0 mt-0.5">
+                                  <Cloud className="w-4 h-4" />
+                                </div>
+                                <div className="space-y-0.5">
+                                  <h5 className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                                    Cópia de {backup.backupDate}
+                                  </h5>
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-600 dark:text-slate-300 font-mono">
+                                    <span>ID: {backup.id.substring(0, 6)}</span>
+                                    <span>•</span>
+                                    <span>{bkBooks} livros</span>
+                                    <span>•</span>
+                                    <span>{bkHistories} logs</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                                <button 
+                                  onClick={() => handleDownloadCloudBackup(backup)}
+                                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white hover:bg-slate-200/40 dark:hover:bg-slate-800/60 rounded-xl transition-all"
+                                  title="Descarregar JSON"
+                                >
+                                  <Download className="w-4 h-4 text-slate-500 dark:text-slate-300" />
+                                </button>
+                                <button 
+                                  onClick={() => handleRestoreCloudBackup(backup)}
+                                  className="p-1.5 px-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 dark:text-emerald-300 dark:bg-emerald-950/30 dark:border-emerald-800/60 hover:bg-emerald-600 hover:text-white dark:hover:bg-emerald-600 dark:hover:text-white rounded-xl text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="Restaurar base de dados atual com este backup"
+                                >
+                                  Restaurar <RefreshCw className="w-3.5 h-3.5" />
+                                </button>
+                                <button 
+                                  onClick={() => handleDeleteCloudBackupRecord(backup.id)}
+                                  className="p-2 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded-xl transition-all"
+                                  title="Eliminar da Nuvem"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="p-6 text-center border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-2xl">
+                        <p className="text-xs font-bold text-slate-600 dark:text-slate-300">Nenhum ponto de restauração na Cloud.</p>
+                        <p className="text-[10px] text-slate-500 dark:text-slate-300 mt-1">Guarde manualmente ou ative as salvaguardas semanais.</p>
+                      </div>
                     )}
                   </div>
                 </div>
+              )}
 
-                {/* Cloud Backups Snapshot List integrated */}
-                <div className="mt-2 border-t border-slate-200/40 dark:border-slate-800 pt-4 space-y-3">
+              {/* Locations Setup */}
+              {isAdmin && (
+                <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
                   <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
-                      <h4 className="text-[11px] uppercase font-black tracking-widest text-[#00897b] dark:text-slate-500">Histórico de Cópias Ativas</h4>
-                      <p className="text-[10px] text-slate-500">Pontos de restauração atualmente salvaguardados em nuvem.</p>
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                        <MapPin className="w-4.5 h-4.5 text-emerald-500" />
+                        Locais de Armazenamento
+                      </h3>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                        Gerencie os armadores, armários ou depósitos físicos de literatura.
+                      </p>
                     </div>
                     <button 
-                      onClick={fetchCloudBackups} 
-                      disabled={loadingBackups}
-                      className="p-1.5 px-3 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-bold rounded-xl border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                      onClick={() => {
+                        if (deleteLocked) {
+                          setPinActionType('unlock');
+                          setShowPinDialog(true);
+                        } else {
+                          setDeleteLocked(true);
+                        }
+                      }} 
+                      className={`p-2 rounded-xl transition-all border flex items-center gap-1.5 cursor-pointer active:scale-95 ${deleteLocked ? 'bg-rose-50 dark:bg-rose-950/30 border-rose-200 dark:border-rose-800/50 text-rose-600 dark:text-rose-300' : 'bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800/50 text-emerald-600 dark:text-emerald-300'}`}
+                      title={deleteLocked ? 'Desbloquear edição com PIN' : 'Bloquear edição'}
                     >
-                      <RefreshCw className={`w-3.5 h-3.5 ${loadingBackups ? 'animate-spin' : ''}`} />
-                      Sincronizar
+                      {deleteLocked ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5" />
+                          <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline">Bloqueado</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5" />
+                          <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline">Editável</span>
+                        </>
+                      )}
                     </button>
                   </div>
 
-                  {loadingBackups ? (
-                    <div className="flex flex-col items-center justify-center py-10 space-y-2 text-slate-400">
-                      <RefreshCw className="w-5 h-5 animate-spin text-[#00897b]" />
-                      <span className="text-[10px] font-bold uppercase tracking-wider">A verificar Supabase...</span>
+                  {deleteLocked && (
+                    <div className="flex gap-2.5 p-3.5 bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-800/40 rounded-2xl">
+                      <Lock className="w-4 h-4 text-amber-600 dark:text-amber-300 mt-0.5 shrink-0" />
+                      <div className="space-y-0.5">
+                        <span className="text-[11px] font-bold text-amber-800 dark:text-amber-300 block">Edição de Locais Bloqueada</span>
+                        <span className="text-[10px] text-amber-700 dark:text-amber-200 block">Clique no cadeado à direita para desbloquear as alterações utilizando o PIN administrativo.</span>
+                      </div>
                     </div>
-                  ) : cloudBackupsList.length > 0 ? (
-                    <div className="space-y-2.5 max-h-[220px] overflow-y-auto pr-1">
-                      {cloudBackupsList.map((backup) => {
-                        let bkBooks = 0;
-                        let bkHistories = 0;
-                        try {
-                          const p = JSON.parse(backup.payload);
-                          bkBooks = p.books?.length || 0;
-                          bkHistories = Object.keys(p.history || {}).length || 0;
-                        } catch (e) {}
+                  )}
 
+                  <div className="space-y-3">
+                    {!deleteLocked && (
+                      <div className="flex gap-2">
+                        <input 
+                          type="text" 
+                          value={newLocationName}
+                          onChange={(e) => setNewLocationName(e.target.value)}
+                          placeholder="Nome do armário ou depósito (ex: Armário A)"
+                          disabled={deleteLocked}
+                          className="flex-1 min-w-0 p-3 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border border-slate-300 dark:border-slate-500 text-xs font-semibold outline-none focus:ring-2 focus:ring-[#00897b]/50 transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400"
+                        />
+                        <button 
+                          onClick={handleAddLocation}
+                          disabled={deleteLocked || !newLocationName.trim()}
+                          className="px-5 shrink-0 bg-[#00897b] hover:bg-[#00796b] text-white rounded-xl shadow-md transition-all font-bold text-xs flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer active:scale-95"
+                        >
+                          <Plus className="w-4 h-4" /> Adicionar
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="space-y-2.5">
+                      {locations.map((loc, idx) => {
+                        const bookCount = books.filter(b => b.loc === loc).length;
                         return (
-                          <div 
-                            key={backup.id} 
-                            className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-none hover:shadow-sm transition-all"
-                          >
-                            <div className="flex items-start gap-2.5">
-                              <div className="w-8 h-8 rounded-xl bg-cyan-50 dark:bg-cyan-950/30 text-cyan-600 dark:text-cyan-400 flex items-center justify-center shrink-0 mt-0.5">
-                                <Cloud className="w-4 h-4" />
+                          <div key={`loc-row-${loc}-${idx}`} className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 hover:shadow-sm transition-all">
+                            {editingLocation === loc ? (
+                              <div className="flex gap-2 w-full">
+                                <input 
+                                  type="text" 
+                                  value={editingLocationName}
+                                  onChange={(e) => setEditingLocationName(e.target.value)}
+                                  className="flex-1 min-w-0 p-2.5 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border border-slate-300 dark:border-slate-500 outline-none text-xs font-semibold focus:ring-2 focus:ring-emerald-500 placeholder:text-slate-500 dark:placeholder:text-slate-400"
+                                  autoFocus
+                                />
+                                <button 
+                                  onClick={() => handleEditLocation(loc)}
+                                  className="p-2.5 shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-sm transition-all cursor-pointer"
+                                >
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => setEditingLocation(null)}
+                                  className="p-2.5 shrink-0 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl shadow-sm hover:bg-slate-300 dark:hover:bg-slate-600 transition-all cursor-pointer"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
                               </div>
-                              <div className="space-y-0.5">
-                                <h5 className="text-xs font-bold text-slate-800 dark:text-slate-100">
-                                  Cópia de {backup.backupDate}
-                                </h5>
-                                <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono">
-                                  <span>ID: {backup.id.substring(0, 6)}</span>
-                                  <span>•</span>
-                                  <span>{bkBooks} livros</span>
-                                  <span>•</span>
-                                  <span>{bkHistories} logs</span>
+                            ) : (
+                              <>
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${bookCount > 0 ? 'bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-300' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300'}`}>
+                                    <MapPin className="w-4 h-4" />
+                                  </div>
+                                  <div className="space-y-0.5">
+                                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100 block">
+                                      {loc}
+                                    </span>
+                                    <span className={`text-[10px] font-semibold block ${bookCount > 0 ? 'text-emerald-600 dark:text-emerald-300' : 'text-slate-500 dark:text-slate-300'}`}>
+                                      {bookCount === 0 ? 'Sem livros associados' : `${bookCount} ${bookCount === 1 ? 'livro catalogado' : 'livros catalogados'}`}
+                                    </span>
+                                  </div>
                                 </div>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-                              <button 
-                                onClick={() => handleDownloadCloudBackup(backup)}
-                                className="p-2 text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/40 dark:hover:bg-slate-800/40 rounded-xl transition-all"
-                                title="Descarregar JSON"
-                              >
-                                <Download className="w-4 h-4 text-slate-400" />
-                              </button>
-                              <button 
-                                onClick={() => handleRestoreCloudBackup(backup)}
-                                className="p-1.5 px-2.5 bg-emerald-55 border border-emerald-150 text-emerald-700 dark:text-emerald-400 dark:bg-emerald-950/20 dark:border-emerald-900/30 hover:bg-emerald-600 hover:text-white dark:hover:bg-emerald-600 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1 cursor-pointer"
-                                title="Restaurar base de dados atual com este backup"
-                              >
-                                Restaurar <RefreshCw className="w-3.5 h-3.5" />
-                              </button>
-                              <button 
-                                onClick={() => handleDeleteCloudBackupRecord(backup.id)}
-                                className="p-2 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/20 rounded-xl transition-all"
-                                title="Eliminar da Nuvem"
-                              >
-                                <Trash2 className="w-4 h-4 text-rose-600" />
-                              </button>
-                            </div>
+                                
+                                <div className="flex gap-1.5 shrink-0">
+                                  <button 
+                                    onClick={() => startEditingLocation(loc)}
+                                    disabled={deleteLocked}
+                                    className="p-2 text-cyan-600 dark:text-cyan-300 hover:text-white dark:hover:text-white hover:bg-cyan-600 rounded-xl border border-cyan-100 dark:border-cyan-800/40 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-cyan-600 cursor-pointer"
+                                    title="Renomear local"
+                                  >
+                                    <Edit2 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleRemoveLocation(loc)}
+                                    disabled={deleteLocked || locations.length <= 1}
+                                    className="p-2 text-rose-600 dark:text-rose-300 hover:text-white dark:hover:text-white hover:bg-rose-600 rounded-xl border border-rose-200 dark:border-rose-800/40 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-rose-600 cursor-pointer"
+                                    title={locations.length <= 1 ? 'Necessita de pelo menos um local ativo' : 'Remover local'}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </>
+                            )}
                           </div>
                         );
                       })}
                     </div>
-                  ) : (
-                    <div className="p-6 text-center border-2 border-dashed border-slate-200 dark:border-slate-800 rounded-2xl">
-                      <p className="text-xs font-bold text-slate-500 dark:text-slate-400">Nenhum ponto de restauração na Cloud.</p>
-                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">Guarde manualmente ou ative as salvaguardas semanais.</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Locations Setup */}
-              <div className="space-y-4 p-5 bg-white dark:bg-slate-800 rounded-3xl shadow-sm border border-slate-100 dark:border-slate-700/50">
-                <div className="flex items-center justify-between">
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
-                      <MapPin className="w-4.5 h-4.5 text-emerald-500" />
-                      Locais de Armazenamento
-                    </h3>
-                    <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                      Gerencie os armadores, armários ou depósitos físicos de literatura.
-                    </p>
-                  </div>
-                  <button 
-                    onClick={() => deleteLocked ? setShowPinDialog(true) : setDeleteLocked(true)} 
-                    className={`p-2 rounded-xl transition-all border flex items-center gap-1.5 cursor-pointer active:scale-95 ${deleteLocked ? 'bg-rose-50 dark:bg-rose-950/15 border-rose-100 dark:border-rose-900/30 text-rose-600' : 'bg-emerald-50 dark:bg-emerald-950/15 border-emerald-100 dark:border-emerald-900/30 text-emerald-600'}`}
-                    title={deleteLocked ? 'Desbloquear edição com PIN' : 'Bloquear edição'}
-                  >
-                    {deleteLocked ? (
-                      <>
-                        <Lock className="w-3.5 h-3.5" />
-                        <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline">Bloqueado</span>
-                      </>
-                    ) : (
-                      <>
-                        <Unlock className="w-3.5 h-3.5" />
-                        <span className="text-[10px] font-bold uppercase tracking-wider hidden sm:inline">Editável</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {deleteLocked && (
-                  <div className="flex gap-2.5 p-3.5 bg-amber-50/60 dark:bg-amber-950/10 border border-amber-200/50 dark:border-amber-900/25 rounded-2xl">
-                    <Lock className="w-4 h-4 text-amber-600 dark:text-amber-500 mt-0.5 shrink-0" />
-                    <div className="space-y-0.5">
-                      <span className="text-[11px] font-bold text-amber-800 dark:text-amber-400 block">Edição de Locais Bloqueada</span>
-                      <span className="text-[10px] text-amber-600 dark:text-amber-500 block">Clique no cadeado à direita para desbloquear as alterações utilizando o PIN administrativo.</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-3">
-                  {!deleteLocked && (
-                    <div className="flex gap-2">
-                      <input 
-                        type="text" 
-                        value={newLocationName}
-                        onChange={(e) => setNewLocationName(e.target.value)}
-                        placeholder="Nome do armário ou depósito (ex: Armário A)"
-                        disabled={deleteLocked}
-                        className="flex-1 min-w-0 p-3 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-semibold outline-none focus:ring-2 focus:ring-[#00897b]/50 transition-all placeholder-slate-400"
-                      />
-                      <button 
-                        onClick={handleAddLocation}
-                        disabled={deleteLocked || !newLocationName.trim()}
-                        className="px-5 shrink-0 bg-[#00897b] hover:bg-[#00796b] text-white rounded-xl shadow-md transition-all font-bold text-xs flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer active:scale-95"
-                      >
-                        <Plus className="w-4 h-4" /> Adicionar
-                      </button>
-                    </div>
-                  )}
-
-                  <div className="space-y-2.5">
-                    {locations.map(loc => {
-                      const bookCount = books.filter(b => b.loc === loc).length;
-                      return (
-                        <div key={loc} className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 hover:shadow-sm transition-all">
-                          {editingLocation === loc ? (
-                            <div className="flex gap-2 w-full">
-                              <input 
-                                type="text" 
-                                value={editingLocationName}
-                                onChange={(e) => setEditingLocationName(e.target.value)}
-                                className="flex-1 min-w-0 p-2.5 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-xl border border-slate-300 dark:border-slate-700 outline-none text-xs font-semibold focus:ring-2 focus:ring-emerald-500"
-                                autoFocus
-                              />
-                              <button 
-                                onClick={() => handleEditLocation(loc)}
-                                className="p-2.5 shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-sm transition-all cursor-pointer"
-                              >
-                                <Check className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={() => setEditingLocation(null)}
-                                className="p-2.5 shrink-0 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl shadow-sm hover:bg-slate-300 dark:hover:bg-slate-700 transition-all cursor-pointer"
-                              >
-                                <X className="w-4 h-4" />
-                              </button>
-                            </div>
-                          ) : (
-                            <>
-                              <div className="flex items-center gap-3">
-                                <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${bookCount > 0 ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
-                                  <MapPin className="w-4 h-4" />
-                                </div>
-                                <div className="space-y-0.5">
-                                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
-                                    {loc}
-                                  </span>
-                                  <span className={`text-[10px] font-semibold block ${bookCount > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`}>
-                                    {bookCount === 0 ? 'Sem livros associados' : `${bookCount} ${bookCount === 1 ? 'livro catalogado' : 'livros catalogados'}`}
-                                  </span>
-                                </div>
-                              </div>
-                              
-                              <div className="flex gap-1.5 shrink-0">
-                                <button 
-                                  onClick={() => startEditingLocation(loc)}
-                                  disabled={deleteLocked}
-                                  className="p-2 text-cyan-600 hover:text-white dark:hover:text-white hover:bg-cyan-600 rounded-xl border border-cyan-100 dark:border-cyan-950/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-cyan-600 cursor-pointer"
-                                  title="Renomear local"
-                                >
-                                  <Edit2 className="w-3.5 h-3.5" />
-                                </button>
-                                <button 
-                                  onClick={() => handleRemoveLocation(loc)}
-                                  disabled={deleteLocked || locations.length <= 1}
-                                  className="p-2 text-rose-600 hover:text-white dark:hover:text-white hover:bg-rose-600 rounded-xl border border-rose-105 dark:border-rose-950/20 transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-rose-600 cursor-pointer"
-                                  title={locations.length <= 1 ? 'Necessita de pelo menos um local ativo' : 'Remover local'}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      );
-                    })}
                   </div>
                 </div>
-              </div>
+              )}
 
               {/* Sobre os Desenvolvedores */}
               <div className="mt-8 pt-6 border-t border-slate-200 dark:border-slate-700/50">
-                <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-100 dark:border-slate-800/60 shadow-sm opacity-90 transition-opacity hover:opacity-100">
-                  <h3 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest flex items-center gap-1.5 mb-2">
+                <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-100 dark:border-slate-700/80 shadow-sm opacity-95 transition-opacity hover:opacity-100">
+                  <h3 className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest flex items-center gap-1.5 mb-2">
                     <Info className="w-3 h-3" />
                     Sobre a Aplicação
                   </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 font-medium mb-3">
-                    Desenvolvido por <span className="font-bold text-slate-700 dark:text-slate-300">Dércio Balane</span>, <span className="font-bold text-slate-700 dark:text-slate-300">Issufo Jussa</span> e <span className="font-bold text-slate-700 dark:text-slate-300">Paulo Viageiro</span>.
+                  <p className="text-xs text-slate-600 dark:text-slate-300 font-medium mb-3">
+                    Desenvolvido por <span className="font-bold text-slate-700 dark:text-slate-100">Dércio Balane</span>, <span className="font-bold text-slate-700 dark:text-slate-100">Issufo Jussa</span> e <span className="font-bold text-slate-700 dark:text-slate-100">Paulo Viageiro</span>.
                   </p>
                   <div className="flex flex-col gap-2">
-                    <a href="mailto:derciojaimebalane21@gmail.com" className="text-xs text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 flex items-center gap-2 w-max transition-colors">
+                    <a href="mailto:derciojaimebalane21@gmail.com" className="text-xs text-slate-600 dark:text-slate-300 hover:text-cyan-600 dark:hover:text-cyan-300 flex items-center gap-2 w-max transition-colors">
                       <div className="w-6 h-6 bg-white dark:bg-slate-700 rounded-lg shadow-sm border border-slate-100 dark:border-slate-600 flex items-center justify-center shrink-0">
                         <Mail className="w-3 h-3" />
                       </div>
                       derciojaimebalane21@gmail.com
                     </a>
-                    <a href="tel:+258875695452" className="text-xs text-slate-500 dark:text-slate-400 hover:text-cyan-600 dark:hover:text-cyan-400 flex items-center gap-2 w-max transition-colors">
+                    <a href="tel:+258875695452" className="text-xs text-slate-600 dark:text-slate-300 hover:text-cyan-600 dark:hover:text-cyan-300 flex items-center gap-2 w-max transition-colors">
                       <div className="w-6 h-6 bg-white dark:bg-slate-700 rounded-lg shadow-sm border border-slate-100 dark:border-slate-600 flex items-center justify-center shrink-0">
                         <Phone className="w-3 h-3" />
                       </div>
@@ -2232,52 +2866,63 @@ export default function App() {
       <AnimatePresence>
         {showNotifications && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.98, y: 15 }}
+            initial={{ opacity: 0, scale: 0.99, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.98, y: 15 }}
-            transition={{ type: "spring", damping: 28, stiffness: 220 }}
-            className="fixed inset-0 z-50 bg-[#F8FAFC] dark:bg-slate-950 overflow-y-auto flex flex-col no-scrollbar"
+            exit={{ opacity: 0, scale: 0.99, y: 10 }}
+            transition={{ type: "spring", damping: 30, stiffness: 240 }}
+            className="fixed inset-0 z-50 bg-[#ecf7f2] dark:bg-[#071310] overflow-y-auto flex flex-col no-scrollbar"
           >
-            {/* Header with decorative fluid shapes */}
-            <div className={`sticky top-0 z-40 pb-5 pt-6 px-5 transition-colors duration-500 rounded-b-[2rem] shadow-md border-b border-slate-100 dark:border-slate-900 ${
-              isLive 
-                ? 'bg-gradient-to-r from-teal-600 to-teal-700 dark:from-teal-800 dark:to-teal-900 text-white' 
-                : 'bg-gradient-to-r from-purple-600 to-purple-750 dark:from-indigo-800 dark:to-indigo-900 text-white'
-            }`}>
-              <div className="max-w-3xl mx-auto flex items-center justify-between">
-                <div className="flex items-center gap-4">
+            {/* iOS style Top Sheet Handle indicator */}
+            <div className="w-12 h-1 bg-slate-300/80 dark:bg-slate-800/80 rounded-full mx-auto mt-3 mb-1 shrink-0 z-50 relative pointer-events-none" />
+
+            {/* Ambient Deep Blue, Cyan & Soft Emerald Glowing Orbs (Extra Blurred Light Green Vibes) */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
+              <div className="absolute top-[-10%] left-[-10%] w-[55%] h-[45%] rounded-full bg-emerald-400/25 dark:bg-emerald-950/15 blur-[140px]" />
+              <div className="absolute top-[20%] right-[-10%] w-[50%] h-[50%] rounded-full bg-teal-400/20 dark:bg-teal-900/15 blur-[130px]" />
+              <div className="absolute bottom-[20%] left-[15%] w-[45%] h-[45%] rounded-full bg-sky-400/10 dark:bg-sky-950/8 blur-[120px]" />
+              <div className="absolute bottom-[-10%] right-[10%] w-[40%] h-[40%] rounded-full bg-emerald-500/15 dark:bg-emerald-900/10 blur-[110px]" />
+            </div>
+
+            {/* Elegant glassmorphic sticky header styled like iOS Navigation bar */}
+            <div className="sticky top-0 z-40 bg-[#ecf7f2]/95 dark:bg-[#071310]/95 backdrop-blur-md border-b border-emerald-100/30 dark:border-slate-800/40 pb-5 pt-4 px-5 transition-all">
+              <div className="max-w-3xl mx-auto flex items-center justify-between relative z-10">
+                <div className="flex items-center gap-3.5">
                   <button 
                     onClick={() => setShowNotifications(false)}
-                    className="w-10 h-10 bg-white/15 backdrop-blur-md rounded-full flex items-center justify-center shadow-inner hover:bg-white/25 active:scale-95 transition-all text-white border border-white/5 cursor-pointer"
+                    className="w-10 h-10 bg-white/70 hover:bg-white dark:bg-slate-900 dark:hover:bg-slate-800/90 text-slate-700 dark:text-slate-300 rounded-full flex items-center justify-center shadow-sm border border-slate-200/40 dark:border-slate-800/80 active:scale-95 transition-all cursor-pointer"
                   >
                     <ArrowLeft className="w-5 h-5" />
                   </button>
                   <div className="flex flex-col text-left">
-                    <h1 className="text-lg font-black tracking-wider uppercase">Central de Avisos</h1>
-                    <p className="text-white/80 text-[11px] font-semibold tracking-wide">Acompanhamento e utilitários rápidos de inventário</p>
+                    <h1 className="text-base font-black tracking-wider uppercase text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                      <Bell className="w-4 h-4 text-emerald-500 animate-pulse shrink-0" />
+                      <span>Central de Avisos</span>
+                    </h1>
+                    <p className="text-slate-500 dark:text-slate-400 text-[10px] font-semibold tracking-wide">Salvaguarda na nuvem, alertas ativos e gestão de operadores</p>
                   </div>
                 </div>
                 {lowStockBooks.length > 0 && (
-                  <span className="bg-orange-555 bg-orange-500 text-white text-[10px] font-black px-3 py-1 rounded-full shadow-md border border-white/10 tracking-widest uppercase animate-pulse">
-                    {lowStockBooks.length} {lowStockBooks.length === 1 ? 'Alerta' : 'Alertas'}
+                  <span className="bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400 text-[9px] font-black px-3.5 py-1.5 rounded-full border border-emerald-100/40 dark:border-emerald-900/30 tracking-widest uppercase animate-pulse leading-none shadow-sm">
+                    {lowStockBooks.length} {lowStockBooks.length === 1 ? 'Alerta Ativo' : 'Alertas Ativos'}
                   </span>
                 )}
               </div>
 
-              {/* Segmented control tabs for admin users only */}
+              {/* Segmented control tabs for admin users only with updated modern card container style */}
               {isAdmin && (
-                <div className="max-w-3xl mx-auto mt-5 px-1">
-                  <div className="grid grid-cols-2 gap-1 p-1 bg-black/15 dark:bg-slate-950/65 backdrop-blur-md rounded-2xl border border-white/10 shadow-inner">
+                <div className="max-w-3xl mx-auto mt-5 px-1 font-sans">
+                  <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/70 dark:bg-slate-900/45 backdrop-blur-md rounded-2xl border border-slate-200/50 dark:border-slate-800/80 shadow-inner">
                     <button
                       onClick={() => setNotifActiveTab('alerts')}
                       className={`py-2 px-3 rounded-xl text-[10px] font-black tracking-widest uppercase flex items-center justify-center gap-2 transition-all cursor-pointer ${
                         notifActiveTab === 'alerts'
-                          ? 'bg-white text-slate-900 shadow-lg scale-[1.01]'
-                          : 'text-white/80 hover:text-white hover:bg-white/5'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-50 shadow-md scale-[1.01]'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/30'
                       }`}
                     >
-                      <AlertTriangle className="w-3.5 h-3.5" />
-                      Alertas de Stock
+                      <AlertTriangle className="w-3.5 h-3.5 min-w-[14px]" />
+                      <span className="hidden sm:inline">Alertas de Stock</span>
+                      <span className="sm:hidden">Alertas</span>
                       {lowStockBooks.length > 0 && (
                         <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0 ml-1" />
                       )}
@@ -2286,12 +2931,25 @@ export default function App() {
                       onClick={() => setNotifActiveTab('backups')}
                       className={`py-2 px-3 rounded-xl text-[10px] font-black tracking-widest uppercase flex items-center justify-center gap-2 transition-all cursor-pointer ${
                         notifActiveTab === 'backups'
-                          ? 'bg-white text-slate-900 shadow-lg scale-[1.01]'
-                          : 'text-white/80 hover:text-white hover:bg-white/5'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-50 shadow-md scale-[1.01]'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/30'
                       }`}
                     >
-                      <Database className="w-3.5 h-3.5" />
-                      Cópias de Segurança
+                      <Database className="w-3.5 h-3.5 min-w-[14px]" />
+                      <span className="hidden sm:inline">Cópias de Segurança</span>
+                      <span className="sm:hidden">Backups</span>
+                    </button>
+                    <button
+                      onClick={() => setNotifActiveTab('users')}
+                      className={`py-2 px-3 rounded-xl text-[10px] font-black tracking-widest uppercase flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                        notifActiveTab === 'users'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-50 shadow-md scale-[1.01]'
+                          : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/30'
+                      }`}
+                    >
+                      <Users className="w-3.5 h-3.5 min-w-[14px]" />
+                      <span className="hidden sm:inline">Gestão de Acessos</span>
+                      <span className="sm:hidden">Utilizadores</span>
                     </button>
                   </div>
                 </div>
@@ -2311,35 +2969,35 @@ export default function App() {
                     className="space-y-4"
                   >
                     <div className="flex items-center gap-2 pl-1">
-                      <AlertTriangle className="w-4 h-4 text-orange-500" />
-                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">
-                        Alertas de Stock Baixo ({lowStockBooks.length})
+                      <AlertTriangle className="w-3.5 h-3.5 text-sky-500/80" />
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 dark:text-slate-300">
+                        Monitorização de Stock ({lowStockBooks.length})
                       </h3>
                     </div>
 
                     {lowStockBooks.length > 0 ? (
                       <>
-                        {/* Summary Widget Card */}
+                        {/* Summary Widget Card - Discrete and Modern */}
                         <motion.div 
                           initial={{ opacity: 0, scale: 0.98 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          className="bg-gradient-to-br from-orange-500/5 via-amber-500/5 to-transparent dark:from-orange-500/10 dark:to-transparent border border-orange-200/50 dark:border-orange-500/20 rounded-[2rem] p-5 flex gap-4 shadow-sm relative overflow-hidden backdrop-blur-md"
+                          className="bg-sky-50/20 dark:bg-slate-900/60 border border-sky-100/40 dark:border-slate-700/80 rounded-[2rem] p-5 flex gap-4 shadow-sm relative overflow-hidden backdrop-blur-md"
                         >
-                          <div className="absolute right-4 top-4 text-orange-500/10 pointer-events-none">
+                          <div className="absolute right-4 top-4 text-sky-500/5 pointer-events-none">
                             <AlertTriangle className="w-24 h-24 transform rotate-12" />
                           </div>
-                          <div className="w-12 h-12 rounded-2xl bg-orange-100 dark:bg-orange-500/20 text-orange-600 dark:text-orange-400 flex items-center justify-center shrink-0 border border-orange-200/20 shadow-md">
-                            <AlertTriangle className="w-6 h-6 animate-pulse" />
+                          <div className="w-10 h-10 rounded-2xl bg-sky-50/70 dark:bg-sky-950/30 text-sky-600 dark:text-sky-300 flex items-center justify-center shrink-0 border border-sky-100/30 dark:border-sky-800/40 shadow-sm">
+                            <AlertTriangle className="w-4 h-4" />
                           </div>
                           <div className="z-10 flex-1 text-left">
-                            <h3 className="text-xs font-black text-orange-850 dark:text-orange-400 uppercase tracking-widest">Atenção Necessária</h3>
-                            <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-1 leading-relaxed font-bold">
-                              Os títulos listados abaixo estão operando com valores de stock abaixo do limite de segurança recomendado. Registre as entradas ou saídas de exemplares rapidamente usando os botões de ajuste rápido.
+                            <h3 className="text-xs font-black text-slate-800 dark:text-slate-100 uppercase tracking-widest">Informação de Stock</h3>
+                            <p className="text-[10.5px] text-slate-600 dark:text-slate-300 mt-1 leading-relaxed font-semibold">
+                              Determinados títulos registam unidades abaixo do limite definido. Se necessário, efetue reajustes breves usando as entradas e saídas rápidas.
                             </p>
                           </div>
                         </motion.div>
 
-                        {/* List of Low Stock Books */}
+                        {/* List of Low Stock Books - Minimalist, Non-Intrusive Layout */}
                         <motion.div 
                           initial="hidden"
                           animate="visible"
@@ -2352,70 +3010,70 @@ export default function App() {
                           }}
                           className="space-y-3"
                         >
-                          {lowStockBooks.map(b => (
+                          {lowStockBooks.map((b, idx) => (
                             <motion.div
-                              key={b.id}
+                              key={b.id || `low-${b.code}-${b.loc}-${idx}`}
                               variants={{
                                 hidden: { opacity: 0, y: 15 },
                                 visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 25 } }
                               }}
-                              className="bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800/80 p-4 rounded-2xl shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all hover:scale-[1.008] hover:shadow-md relative overflow-hidden text-left"
+                              className="bg-white/80 dark:bg-slate-900/90 border border-slate-200/50 dark:border-slate-700/80 p-4 rounded-2xl shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all hover:scale-[1.005] hover:shadow-md relative overflow-hidden text-left backdrop-blur-md"
                             >
-                              <div className={`absolute left-0 top-0 bottom-0 w-[5px] ${getCatColor(b.category)} bg-opacity-95 z-10`} />
-                              
-                              <div className="flex items-center gap-3.5 pl-1.5 flex-1 min-w-0">
-                                <div className="w-10 h-10 bg-slate-50 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 rounded-xl flex items-center justify-center border border-slate-100 dark:border-slate-800 shrink-0 shadow-sm">
+                              <div className="flex items-center gap-3.5 flex-1 min-w-0">
+                                <div className="w-10 h-10 bg-slate-50/80 dark:bg-slate-800/90 text-slate-600 dark:text-slate-300 rounded-xl flex items-center justify-center border border-slate-100 dark:border-slate-700 shrink-0 shadow-sm relative">
                                   {CAT_META[b.category]?.icon || <Book className="w-5 h-5" />}
+                                  {/* Discreet small badge status dot instead of solid sidebar */}
+                                  <span className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border border-white dark:border-slate-900 ${getCatColor(b.category)}`} />
                                 </div>
                                 <div className="min-w-0">
-                                  <h4 className="text-[13px] font-black text-slate-800 dark:text-slate-105 leading-snug truncate">
+                                  <h4 className="text-[13px] font-black text-slate-900 dark:text-slate-100 leading-snug truncate">
                                     {b.name}
                                   </h4>
-                                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 mt-1.5 uppercase tracking-wider">
-                                    <span className="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-[9px]">{b.code}</span>
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono font-bold text-slate-500 dark:text-slate-300 mt-1.5 uppercase tracking-wider">
+                                    <span className="bg-slate-100/90 dark:bg-slate-800 px-1.5 py-0.5 rounded text-[9px] text-slate-700 dark:text-slate-200">{b.code}</span>
                                     <span>•</span>
-                                    <span className="bg-slate-105 dark:bg-slate-800 px-1.5 py-0.5 rounded text-[9px]">{b.loc}</span>
+                                    <span className="bg-slate-100/90 dark:bg-slate-800 px-1.5 py-0.5 rounded text-[9px] text-slate-700 dark:text-slate-200">{b.loc}</span>
                                     <span>•</span>
-                                    <span>{b.category}</span>
+                                    <span className="text-slate-600 dark:text-slate-300">{b.category}</span>
                                   </div>
                                 </div>
                               </div>
 
-                              <div className="flex items-center justify-between sm:justify-start gap-4 shrink-0 pl-1.5 sm:pl-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800 pt-3.5 sm:pt-0">
+                              <div className="flex items-center justify-between sm:justify-start gap-4 shrink-0 pr-1.5 border-t sm:border-t-0 border-slate-100 dark:border-slate-800 pt-3.5 sm:pt-0">
                                 {/* Badge and Current available quantity */}
                                 <div className="flex items-center gap-2.5">
-                                  <div className="flex flex-col items-end min-w-[65px]">
+                                  <div className="flex flex-col items-end min-w-[70px]">
                                     {getAvail(b) === 0 ? (
-                                      <span className="px-2 py-0.5 bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 text-[8px] font-black uppercase rounded-md border border-rose-100 dark:border-rose-900/30 tracking-widest leading-none">
+                                      <span className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[8.5px] font-bold uppercase rounded border border-slate-200 dark:border-slate-600 tracking-wider leading-none">
                                         Esgotado
                                       </span>
                                     ) : (
-                                      <span className="px-2 py-0.5 bg-orange-50 dark:bg-orange-950/15 text-orange-600 dark:text-orange-400 text-[8px] font-black uppercase rounded-md border border-orange-100 dark:border-orange-900/20 tracking-widest leading-none animate-pulse">
-                                        Baixo
+                                      <span className="px-2 py-0.5 bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 text-[8.5px] font-bold uppercase rounded border border-sky-200/60 dark:border-sky-800/50 tracking-wider leading-none">
+                                        Pendente
                                       </span>
                                     )}
-                                    <span className={`text-xl font-black leading-none mt-1 ${getAvail(b) === 0 ? 'text-rose-500' : 'text-slate-900 dark:text-slate-100'}`}>
+                                    <span className={`text-xl font-black leading-none mt-1.5 ${getAvail(b) === 0 ? 'text-slate-500 dark:text-slate-300 font-bold' : 'text-slate-800 dark:text-slate-100'}`}>
                                       {getAvail(b)}
                                     </span>
                                   </div>
                                 </div>
 
-                                <div className="h-8 w-px bg-slate-150 dark:bg-slate-800 hidden sm:block" />
+                                <div className="h-8 w-px bg-slate-200 dark:bg-slate-700 hidden sm:block" />
 
                                 {/* Tactile incremental modifiers */}
                                 <div className="flex items-center gap-1.5">
                                   <button
                                     onClick={() => setAdjustModal({ isOpen: true, book: b, type: 'in', amount: 1 })}
-                                    className="p-2 px-2.5 bg-emerald-50 hover:bg-emerald-600 dark:bg-emerald-950/20 dark:hover:bg-emerald-600 text-emerald-600 hover:text-white rounded-xl border border-emerald-100 dark:border-emerald-900/20 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-[10px] uppercase font-black tracking-widest cursor-pointer shadow-sm"
+                                    className="p-2 px-2.5 bg-sky-50 hover:bg-sky-600 dark:bg-sky-950/30 dark:hover:bg-sky-600 text-sky-700 dark:text-sky-300 hover:text-white rounded-xl border border-sky-200/60 dark:border-sky-800/40 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-[10px] uppercase font-black tracking-widest cursor-pointer shadow-sm"
                                     title="Registar Entrada"
                                   >
-                                    <PlusCircle className="w-4 h-4 text-emerald-500 hover:text-white dark:text-emerald-400 shrink-0" />
+                                    <PlusCircle className="w-4 h-4 text-sky-600 dark:text-sky-300 hover:text-white shrink-0" />
                                     <span>Entrada</span>
                                   </button>
                                   <button
                                     onClick={() => setAdjustModal({ isOpen: true, book: b, type: 'out', amount: 1 })}
                                     disabled={getAvail(b) <= 0}
-                                    className="p-2 px-2.5 bg-slate-50 hover:bg-amber-600 dark:bg-slate-900 dark:hover:bg-amber-600 text-slate-605 hover:text-white dark:text-slate-400 rounded-xl border border-slate-205 dark:border-slate-800 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-[10px] uppercase font-black tracking-widest cursor-pointer shadow-sm disabled:opacity-40 disabled:pointer-events-none"
+                                    className="p-2 px-2.5 bg-slate-100 hover:bg-amber-600 dark:bg-slate-800 dark:hover:bg-amber-600 text-slate-700 hover:text-white dark:text-slate-200 rounded-xl border border-slate-200/60 dark:border-slate-600 transition-all hover:scale-105 active:scale-95 flex items-center gap-1.5 text-[10px] uppercase font-black tracking-widest cursor-pointer shadow-sm disabled:opacity-40 disabled:pointer-events-none"
                                     title="Registar Saída"
                                   >
                                     <Minus className="w-3.5 h-3.5 shrink-0" />
@@ -2432,19 +3090,19 @@ export default function App() {
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="text-center py-20 px-6 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800/80 rounded-[2.5rem] shadow-sm max-w-md mx-auto"
+                        className="text-center py-20 px-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-[2.5rem] shadow-sm max-w-md mx-auto"
                       >
-                        <div className="w-16 h-16 bg-emerald-50 dark:bg-emerald-500/10 text-emerald-500 rounded-full flex items-center justify-center mx-auto mb-5 border-2 border-emerald-100 dark:border-emerald-900/30 shadow-md">
-                          <Check className="w-8 h-8 animate-bounce" />
+                        <div className="w-16 h-16 bg-emerald-50 dark:bg-emerald-500/15 text-emerald-500 dark:text-emerald-300 rounded-full flex items-center justify-center mx-auto mb-5 border border-emerald-100 dark:border-emerald-800/40 shadow-md">
+                          <Check className="w-8 h-8" />
                         </div>
                         <h3 className="text-sm font-black text-slate-800 dark:text-slate-100 uppercase tracking-widest mb-1.5">Tudo Perfeito!</h3>
-                        <p className="text-[11px] text-slate-400 dark:text-slate-400 font-bold leading-relaxed">
+                        <p className="text-[11px] text-slate-500 dark:text-slate-300 font-bold leading-relaxed">
                           Excelente trabalho! O stock da biblioteca está saudável e completo.
                         </p>
                       </motion.div>
                     )}
                   </motion.div>
-                ) : (
+                ) : notifActiveTab === 'backups' ? (
                   /* COPIAS DE SEGURANÇA (BACKUPS) TAB CONTENT */
                   <motion.div
                     key="tab-backups"
@@ -2455,8 +3113,8 @@ export default function App() {
                     className="space-y-4 font-sans text-left"
                   >
                     <div className="flex items-center gap-2 pl-1">
-                      <Database className="w-4 h-4 text-teal-600" />
-                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">
+                      <Database className="w-4 h-4 text-teal-600 dark:text-teal-300" />
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 dark:text-slate-300">
                         Histórico de Salvaguardas na Nuvem ({cloudBackupsList.length})
                       </h3>
                     </div>
@@ -2465,15 +3123,15 @@ export default function App() {
                     <motion.div 
                       initial={{ opacity: 0, scale: 0.98 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      className="bg-gradient-to-br from-indigo-500/5 via-cyan-500/5 to-transparent dark:from-indigo-500/10 dark:to-transparent border border-indigo-200/40 dark:border-slate-800 rounded-[2rem] p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm backdrop-blur-md"
+                      className="bg-gradient-to-br from-indigo-500/5 via-cyan-500/5 to-transparent dark:from-indigo-500/10 dark:to-transparent border border-indigo-200/40 dark:border-slate-700 rounded-[2rem] p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm backdrop-blur-md"
                     >
                       <div className="flex gap-4 items-start">
-                        <div className="w-12 h-12 rounded-2xl bg-indigo-100 dark:bg-indigo-950/45 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0 border border-indigo-200/20 shadow-md">
+                        <div className="w-12 h-12 rounded-2xl bg-indigo-100 dark:bg-indigo-950/45 text-indigo-600 dark:text-indigo-300 flex items-center justify-center shrink-0 border border-indigo-200/20 shadow-md">
                           <Cloud className="w-6 h-6 animate-pulse" />
                         </div>
                         <div className="flex-1 text-left">
                           <h3 className="text-xs font-black text-slate-800 dark:text-slate-100 uppercase tracking-widest">Cópias Seguras</h3>
-                          <p className="text-[11px] text-slate-650 dark:text-slate-400 mt-1 leading-relaxed font-semibold">
+                          <p className="text-[11px] text-slate-600 dark:text-slate-300 mt-1 leading-relaxed font-semibold">
                             Salve todos os livros, locais e histórico de lançamentos em nuvem usando autenticação ultra-segura no Supabase PostgreSQL.
                           </p>
                         </div>
@@ -2490,7 +3148,7 @@ export default function App() {
                         <button 
                           onClick={fetchCloudBackups} 
                           disabled={loadingBackups}
-                          className="p-2.5 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] font-black uppercase tracking-wider rounded-xl border border-slate-200 dark:border-slate-800 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-sm active:scale-95"
+                          className="p-2.5 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-200 text-[10px] font-black uppercase tracking-wider rounded-xl border border-slate-200 dark:border-slate-700 transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer shadow-sm active:scale-95"
                           title="Sincronizar Backups"
                         >
                           <RefreshCw className={`w-3.5 h-3.5 ${loadingBackups ? 'animate-spin' : ''}`} />
@@ -2501,9 +3159,9 @@ export default function App() {
                     {/* List of active recovery points in cloud */}
                     <div className="space-y-3">
                       {loadingBackups ? (
-                        <div className="flex flex-col items-center justify-center py-20 space-y-3 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800/80 rounded-[2.5rem]">
+                        <div className="flex flex-col items-center justify-center py-20 space-y-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-[2.5rem]">
                           <RefreshCw className="w-8 h-8 animate-spin text-cyan-500" />
-                          <span className="text-[11px] font-black uppercase tracking-widest text-slate-400 dark:text-slate-500">Conectando ao Supabase...</span>
+                          <span className="text-[11px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-300">Conectando ao Supabase...</span>
                         </div>
                       ) : cloudBackupsList.length > 0 ? (
                         <motion.div 
@@ -2518,7 +3176,7 @@ export default function App() {
                           }}
                           className="space-y-3 max-h-[480px] overflow-y-auto no-scrollbar pr-1"
                         >
-                          {cloudBackupsList.map((backup) => {
+                          {cloudBackupsList.map((backup, idx) => {
                             let bkBooks = 0;
                             let bkHistories = 0;
                             try {
@@ -2529,27 +3187,27 @@ export default function App() {
 
                             return (
                               <motion.div 
-                                key={backup.id}
+                                key={backup.id || `backup-notif-${idx}`}
                                 variants={{
                                   hidden: { opacity: 0, y: 12 },
                                   visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 25 } }
                                 }}
-                                className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-150 dark:border-slate-800 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:shadow-md hover:scale-[1.002] text-left"
+                                className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4 transition-all hover:shadow-md hover:scale-[1.002] text-left"
                               >
                                 <div className="flex items-start gap-3.5">
-                                  <div className="w-10 h-10 rounded-xl bg-cyan-50 dark:bg-cyan-950/35 text-cyan-600 dark:text-cyan-400 flex items-center justify-center shrink-0 border border-cyan-100 dark:border-cyan-900/30 shadow-inner">
+                                  <div className="w-10 h-10 rounded-xl bg-cyan-50 dark:bg-cyan-950/35 text-cyan-600 dark:text-cyan-300 flex items-center justify-center shrink-0 border border-cyan-100 dark:border-cyan-800/40 shadow-inner">
                                     <Cloud className="w-5 h-5" />
                                   </div>
                                   <div className="space-y-1">
                                     <h4 className="text-xs font-black text-slate-800 dark:text-slate-100 flex items-center gap-2 uppercase tracking-wide">
                                       Cópia de {backup.backupDate}
                                     </h4>
-                                    <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500">
-                                      <span className="bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-[9px] uppercase">ID: {backup.id.substring(0, 8)}</span>
+                                    <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono font-bold text-slate-500 dark:text-slate-300">
+                                      <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 px-1.5 py-0.5 rounded text-[9px] uppercase">ID: {backup.id.substring(0, 8)}</span>
                                       <span>•</span>
-                                      <span className="bg-emerald-50 text-emerald-800 dark:bg-emerald-950/25 dark:text-emerald-400 px-1.5 py-0.5 rounded">{bkBooks} livros</span>
+                                      <span className="bg-emerald-50 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 px-1.5 py-0.5 rounded">{bkBooks} livros</span>
                                       <span>•</span>
-                                      <span className="bg-indigo-55 bg-indigo-50 text-indigo-900 dark:bg-indigo-950/25 dark:text-indigo-400 px-1.5 py-0.5 rounded">{bkHistories} logs</span>
+                                      <span className="bg-indigo-50 text-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-200 px-1.5 py-0.5 rounded">{bkHistories} logs</span>
                                     </div>
                                   </div>
                                 </div>
@@ -2557,24 +3215,24 @@ export default function App() {
                                 <div className="flex items-center gap-2 shrink-0 self-end md:self-center border-t md:border-t-0 border-slate-100 dark:border-slate-800 pt-3 md:pt-0 w-full md:w-auto justify-end">
                                   <button 
                                     onClick={() => handleDownloadCloudBackup(backup)}
-                                    className="p-2 px-3 text-slate-700 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-xl text-[10px] uppercase font-black tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+                                    className="p-2 px-3 text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-600 rounded-xl text-[10px] uppercase font-black tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
                                     title="Descarregar ficheiro JSON"
                                   >
-                                    JSON <Download className="w-3.5 h-3.5 text-slate-400" />
+                                    JSON <Download className="w-3.5 h-3.5 text-slate-500 dark:text-slate-300" />
                                   </button>
                                   <button 
                                     onClick={() => handleRestoreCloudBackup(backup)}
-                                    className="p-2 px-3 text-emerald-700 hover:text-white dark:text-emerald-400 bg-emerald-50 hover:bg-emerald-600 dark:bg-emerald-950/20 dark:hover:bg-emerald-600 border border-emerald-100 dark:border-emerald-999 dark:border-emerald-900 rounded-xl text-[10px] uppercase font-black tracking-wider transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer shadow-sm"
+                                    className="p-2 px-3 text-emerald-700 hover:text-white dark:text-emerald-300 dark:hover:text-white bg-emerald-50 hover:bg-emerald-600 dark:bg-emerald-950/30 dark:hover:bg-emerald-600 border border-emerald-200 dark:border-emerald-800 rounded-xl text-[10px] uppercase font-black tracking-wider transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer shadow-sm"
                                     title="Substituir dados atuais por este backup"
                                   >
                                     Restaurar <RefreshCw className="w-3.5 h-3.5" />
                                   </button>
                                   <button 
                                     onClick={() => handleDeleteCloudBackupRecord(backup.id)}
-                                    className="p-2 text-rose-600 hover:text-white bg-rose-50 hover:bg-rose-600 dark:bg-red-950/20 dark:hover:bg-rose-600 dark:text-rose-400 border border-rose-150 dark:border-rose-950 rounded-xl text-[11px] font-bold transition-all flex items-center active:scale-95 cursor-pointer shadow-sm"
+                                    className="p-2 text-rose-600 dark:text-rose-300 hover:text-white dark:hover:text-white bg-rose-50 hover:bg-rose-600 dark:bg-red-950/30 dark:hover:bg-rose-600 border border-rose-200 dark:border-rose-800 rounded-xl text-[11px] font-bold transition-all flex items-center active:scale-95 cursor-pointer shadow-sm"
                                     title="Eliminar este registo"
                                   >
-                                    <Trash2 className="w-4 h-4 text-rose-600" />
+                                    <Trash2 className="w-4 h-4" />
                                   </button>
                                 </div>
                               </motion.div>
@@ -2586,11 +3244,11 @@ export default function App() {
                         <motion.div 
                           initial={{ opacity: 0, scale: 0.95 }}
                           animate={{ opacity: 1, scale: 1 }}
-                          className="bg-white dark:bg-slate-900 p-10 text-center rounded-[2.5rem] border border-dashed border-slate-200 dark:border-slate-800 shadow-sm max-w-sm mx-auto"
+                          className="bg-white dark:bg-slate-900 p-10 text-center rounded-[2.5rem] border border-dashed border-slate-200 dark:border-slate-700 shadow-sm max-w-sm mx-auto"
                         >
-                          <Cloud className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600 mb-3" />
+                          <Cloud className="w-10 h-10 mx-auto text-slate-400 dark:text-slate-400 mb-3" />
                           <h4 className="text-xs font-black uppercase tracking-widest text-slate-800 dark:text-slate-100 mb-1">Nenhum Backup em Nuvem</h4>
-                          <p className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold leading-relaxed mb-4">
+                          <p className="text-[11px] text-slate-600 dark:text-slate-300 font-semibold leading-relaxed mb-4">
                             Não encontrámos pontos de salvaguarda salvos nesta conta. Proteja a sua biblioteca criando uma cópia agora mesmo.
                           </p>
                           <button
@@ -2601,6 +3259,254 @@ export default function App() {
                             Salvaguardar
                           </button>
                         </motion.div>
+                      )}
+                    </div>
+                  </motion.div>
+                ) : (
+                  /* GESTÃO DE ACESSOS (USERS) TAB CONTENT */
+                  <motion.div
+                    key="tab-users"
+                    initial={{ opacity: 0, y: 15 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -15 }}
+                    transition={{ duration: 0.25 }}
+                    className="space-y-6 font-sans text-left"
+                  >
+                    <div className="flex items-center gap-2 pl-1">
+                      <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-300 animate-pulse" />
+                      <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 dark:text-slate-300">
+                        Gestão de Acessos e Limitação de Locais
+                      </h3>
+                    </div>
+
+                    {/* Active Configuration List */}
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between pl-1">
+                        <h4 className="text-[10px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest leading-none">
+                          Utilizadores e Configurações Ativas
+                        </h4>
+                        <button
+                          onClick={fetchProfiles}
+                          disabled={loadingProfiles}
+                          className="p-1 px-2.5 bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-200 rounded-lg text-[9px] uppercase font-black tracking-widest flex items-center gap-1.5 cursor-pointer border border-slate-200/50 dark:border-slate-700"
+                        >
+                          <RefreshCw className={`w-2.5 h-2.5 ${loadingProfiles ? 'animate-spin' : ''}`} />
+                          Sincronizar
+                        </button>
+                      </div>
+
+                      {loadingProfiles ? (
+                        <div className="flex flex-col items-center justify-center py-16 space-y-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700/80 rounded-[2.5rem]">
+                          <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+                          <span className="text-[11px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-300">A carregar utilizadores...</span>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {(() => {
+                            const accList = workspace?.accessList || [];
+                            const emailsWithProfile = new Set(profilesList.map(p => p.email.toLowerCase().trim()));
+                            const mergedUsers: any[] = [...profilesList.map(p => ({
+                              id: p.id,
+                              name: p.name,
+                              email: p.email,
+                              role: p.role,
+                              isRegistered: true
+                            }))];
+
+                            accList.forEach((acc: any) => {
+                              const emailNorm = acc.email?.toLowerCase().trim();
+                              if (emailNorm && !emailsWithProfile.has(emailNorm)) {
+                                mergedUsers.push({
+                                  id: `pre_${emailNorm}`,
+                                  name: emailNorm.split('@')[0],
+                                  email: acc.email,
+                                  role: acc.role || 'operator',
+                                  isRegistered: false
+                                });
+                              }
+                            });
+
+                            if (mergedUsers.length === 0) {
+                              return (
+                                <div className="text-center py-12 px-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl text-slate-500 dark:text-slate-300 text-xs font-semibold">
+                                  Nenhum utilizador registado ou configurado no sistema.
+                                </div>
+                              );
+                            }
+
+                            return mergedUsers.sort((a,b) => (b.isRegistered ? 1 : 0) - (a.isRegistered ? 1 : 0) || a.email.localeCompare(b.email)).map((u, userIdx) => {
+                              const userAccess = accList.find((x: any) => x.email?.toLowerCase().trim() === u.email?.toLowerCase().trim());
+                              const rawRole = userAccess?.role || u.role || 'operator';
+                              const currentRole = (() => {
+                                const r = rawRole.toLowerCase().trim();
+                                if (r === 'admin' || r === 'administrador') return 'admin';
+                                if (r === 'operator' || r === 'operador') return 'operator';
+                                if (r === 'collaborator' || r === 'colaborador') return 'collaborator';
+                                return 'collaborator';
+                              })();
+                              const allowedLocations = Array.isArray(userAccess?.locations) ? userAccess.locations : [];
+                              const isMasterAdmin = u.email && ['derciojaimebalane21@gmail.com', 'derciojaimebalane@outlook.com'].includes(u.email.toLowerCase().trim());
+
+                              return (
+                                <motion.div
+                                  key={u.id || `user-${u.email}-${userIdx}`}
+                                  initial={{ opacity: 0, scale: 0.97, y: 15 }}
+                                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                                  whileHover={{ y: -6, scale: 1.015 }}
+                                  whileTap={{ y: 1, scale: 0.99 }}
+                                  transition={{ type: "spring", stiffness: 350, damping: 20 }}
+                                  className="bg-white/95 dark:bg-slate-900/90 border border-slate-200/90 dark:border-slate-700/95 rounded-[2rem] p-5.5 flex flex-col gap-4 text-left relative overflow-hidden backdrop-blur-md transition-all duration-300 border-b-[8px] border-b-slate-300 dark:border-b-indigo-950/80 shadow-[0_8px_0_0_#cbd5e1,_0_14px_28px_-8px_rgba(0,0,0,0.08)] dark:shadow-[0_8px_0_0_#030712,_0_14px_28px_-8px_rgba(0,0,0,0.5)] cursor-default"
+                                >
+                                  {/* User Top Row: Profile Meta & Role Toggler & Bevel 2.5D details */}
+                                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 relative z-10">
+                                    <div className="flex items-center gap-3.5 min-w-0">
+                                      <div className="relative shrink-0">
+                                        <div className="w-11 h-11 rounded-2xl bg-slate-50 dark:bg-slate-800/90 text-slate-600 dark:text-slate-200 border border-slate-200/60 dark:border-slate-600 border-b-[3px] border-b-slate-200 dark:border-b-slate-900 shadow-inner flex items-center justify-center font-black text-xs uppercase">
+                                          {u.name?.substring(0, 2) || u.email?.substring(0, 2) || 'UT'}
+                                        </div>
+                                        {u.isRegistered ? (
+                                          <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-emerald-500 border-2 border-white dark:border-slate-900 rounded-full animate-pulse shadow-sm" title="Registado e Ativo" />
+                                        ) : (
+                                          <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-amber-500 border-2 border-white dark:border-slate-900 rounded-full shadow-sm" title="Acesso Pré-configurado" />
+                                        )}
+                                      </div>
+                                      <div className="min-w-0">
+                                        <h4 className="text-[13px] font-black text-slate-900 dark:text-slate-100 flex items-center gap-2 truncate leading-snug">
+                                          {u.name}
+                                          {isMasterAdmin && (
+                                            <span className="bg-rose-50 dark:bg-rose-950/40 text-rose-600 dark:text-rose-300 border border-rose-200/50 dark:border-rose-800/50 text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest shrink-0 shadow-inner">MASTER</span>
+                                          )}
+                                        </h4>
+                                        <p className="text-[9.5px] text-slate-600 dark:text-slate-300 font-mono font-black leading-relaxed truncate uppercase tracking-wider">
+                                          {u.email}
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Role Selection Dropdown with 2.5D Border */}
+                                    <div className="flex items-center gap-2.5 self-start sm:self-center shrink-0">
+                                      <span className="text-[10px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest">Cargo:</span>
+                                      <select
+                                        value={currentRole}
+                                        disabled={isMasterAdmin}
+                                        onChange={async (e) => {
+                                          const newRole = e.target.value;
+                                          if (u.isRegistered) {
+                                            await handleUpdateUserRole(u.id, newRole);
+                                          }
+                                          const list = [...accList];
+                                          const normEmail = u.email.toLowerCase().trim();
+                                          let idx = list.findIndex((x: any) => x.email?.toLowerCase().trim() === normEmail);
+                                          if (idx === -1) {
+                                            list.push({ email: normEmail, role: newRole, locations: [] });
+                                          } else {
+                                            list[idx] = { ...list[idx], role: newRole };
+                                          }
+                                          await updateWorkspaceAccessList(list);
+                                          showToast(`Cargo atualizado para "${newRole === 'admin' ? 'Administrador' : newRole === 'operator' ? 'Operador' : 'Colaborador'}"`);
+                                          fetchProfiles();
+                                        }}
+                                        className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-500 border-b-[3.5px] border-b-slate-300 dark:border-b-indigo-800 px-2.5 py-1.5 rounded-xl text-[10px] font-black tracking-widest uppercase text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer disabled:opacity-50 shadow-sm"
+                                      >
+                                        <option value="operator">Operador</option>
+                                        <option value="collaborator">Colaborador</option>
+                                        <option value="admin">Admin</option>
+                                      </select>
+
+                                      {!isMasterAdmin && (
+                                        <button
+                                          onClick={async () => {
+                                            if (window.confirm(`Tem a certeza de que deseja eliminar completamente o utilizador ${u.email} e todos os seus privilégios de acesso?`)) {
+                                              try {
+                                                const list = accList.filter((x: any) => x.email?.toLowerCase().trim() !== u.email?.toLowerCase().trim());
+                                                await updateWorkspaceAccessList(list);
+                                                
+                                                if (u.isRegistered) {
+                                                  const { error: delErr } = await supabase
+                                                    .from('profiles')
+                                                    .delete()
+                                                    .eq('id', u.id);
+                                                  if (delErr) throw delErr;
+                                                }
+                                                
+                                                showToast('Utilizador e privilégios eliminados com sucesso!');
+                                                fetchProfiles();
+                                              } catch (err: any) {
+                                                console.error(err);
+                                                showToast(`Erro ao eliminar utilizador: ${err.message || err}`);
+                                              }
+                                            }
+                                          }}
+                                          className="p-2 hover:bg-rose-50 dark:hover:bg-rose-950/30 text-slate-500 dark:text-slate-300 hover:text-rose-500 dark:hover:text-rose-300 rounded-xl transition-all cursor-pointer border border-transparent hover:border-rose-200 dark:hover:border-rose-800/50"
+                                          title="Eliminar Utilizador"
+                                        >
+                                          <Trash2 className="w-4 h-4 text-rose-500 dark:text-rose-400" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* User Bottom Row: Location Restrictions with detailed 3D bevel buttons */}
+                                  <div className="border-t border-slate-200/50 dark:border-slate-700/80 pt-4 text-left space-y-2.5 relative z-10">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[10px] font-black text-slate-500 dark:text-slate-300 uppercase tracking-widest block">
+                                        Libertação de Locais (Escrita):
+                                      </span>
+                                      {currentRole === 'admin' ? (
+                                        <span className="text-[9px] font-black text-indigo-700 dark:text-indigo-200 uppercase tracking-wider bg-indigo-50 dark:bg-indigo-950/40 px-2.5 py-1 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shadow-sm">
+                                          Acesso Total (Admin)
+                                        </span>
+                                      ) : currentRole === 'collaborator' ? (
+                                        <span className="text-[9px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-wider bg-slate-50 dark:bg-slate-800 px-2.5 py-1 rounded-md border border-slate-200 dark:border-slate-600 shadow-sm">
+                                          Apenas Visualização
+                                        </span>
+                                      ) : allowedLocations.length === 0 ? (
+                                        <span className="text-[9px] font-black text-rose-600 dark:text-rose-300 uppercase tracking-wider bg-rose-50/70 dark:bg-rose-950/35 px-2.5 py-1 rounded-md border border-rose-200/60 dark:border-rose-800/50 animate-pulse shadow-sm">
+                                          Apenas Leitura
+                                        </span>
+                                      ) : (
+                                        <span className="text-[9px] font-black text-emerald-700 dark:text-emerald-300 uppercase tracking-wider bg-emerald-50 dark:bg-emerald-950/35 px-2.5 py-1 rounded-md border border-emerald-200/60 dark:border-emerald-800/50 shadow-sm">
+                                          {allowedLocations.length} de {locations.length} locais
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {currentRole === 'operator' ? (
+                                      <div className="flex flex-wrap gap-2 pt-1">
+                                        {locations.map((loc, locIdx) => {
+                                          const hasAccess = allowedLocations.some(l => l.toLowerCase().trim() === loc.toLowerCase().trim());
+                                          return (
+                                            <button
+                                              key={`perm-${u.id || u.email}-${loc}-${locIdx}`}
+                                              onClick={() => handleToggleLocationPermission(u.email, loc)}
+                                              className={`py-1.5 px-3 rounded-xl text-[9px] uppercase font-black tracking-widest cursor-pointer transition-all flex items-center gap-2 border active:translate-y-[1px] ${
+                                                hasAccess
+                                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200 border-b-[3.5px] border-b-emerald-300 hover:bg-emerald-100/80 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-700 dark:border-b-emerald-800 shadow-sm'
+                                                  : 'bg-white text-slate-600 border-slate-200 border-b-[3.5px] border-b-slate-300 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-300 dark:border-slate-600 dark:border-b-slate-700 shadow-sm'
+                                              }`}
+                                              title={hasAccess ? `Revogar permissão de escrita em ${loc}` : `Conceder permissão de escrita em ${loc}`}
+                                            >
+                                              <span className={`w-1.5 h-1.5 rounded-full ${hasAccess ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400 dark:bg-slate-400'}`} />
+                                              {loc}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    ) : currentRole === 'collaborator' ? (
+                                      <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold p-3.5 bg-slate-50/70 dark:bg-slate-950/50 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 leading-normal">
+                                        Como colaborador, este utilizador tem apenas permissões de visualização e leitura. Não está autorizado a efetuar alterações de stock em nenhum local.
+                                      </div>
+                                    ) : (
+                                      <div className="text-[10px] text-slate-600 dark:text-slate-300 font-semibold p-3.5 bg-slate-50/70 dark:bg-slate-950/50 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700 leading-normal">
+                                        Como administrador, este utilizador tem privilégios de escrita, criação e eliminação irrestritos e automáticos em todas as localizações configuradas do workspace.
+                                      </div>
+                                    )}
+                                  </div>
+                                </motion.div>
+                              );
+                            });
+                          })()}
+                        </div>
                       )}
                     </div>
                   </motion.div>
@@ -2644,20 +3550,20 @@ export default function App() {
               {/* Key Metrics */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border border-slate-100 dark:border-slate-700 shadow-sm flex flex-col justify-center items-center text-center">
-                  <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Total de Livros (Títulos)</span>
+                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest mb-1">Total de Livros (Títulos)</span>
                   <span className="text-2xl font-black text-slate-800 dark:text-slate-100">{new Set(books.map(b => b.code)).size}</span>
                 </div>
                 <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border border-slate-100 dark:border-slate-700 shadow-sm flex flex-col justify-center items-center text-center">
-                  <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Total em Stock (Exemplares)</span>
-                  <span className="text-2xl font-black text-indigo-600 dark:text-indigo-400">{books.reduce((sum, b) => sum + getAvail(b), 0)}</span>
+                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest mb-1">Total em Stock (Exemplares)</span>
+                  <span className="text-2xl font-black text-indigo-600 dark:text-indigo-300">{books.reduce((sum, b) => sum + getAvail(b), 0)}</span>
                 </div>
                 <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border border-slate-100 dark:border-slate-700 shadow-sm flex flex-col justify-center items-center text-center">
-                  <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Entradas (Local Atual)</span>
-                  <span className="text-2xl font-black text-emerald-600 dark:text-emerald-400">+{books.reduce((sum, b) => sum + b.in, 0)}</span>
+                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest mb-1">Entradas (Local Atual)</span>
+                  <span className="text-2xl font-black text-emerald-600 dark:text-emerald-300">+{books.reduce((sum, b) => sum + b.in, 0)}</span>
                 </div>
                 <div className="bg-white dark:bg-slate-800 p-4 rounded-3xl border border-slate-100 dark:border-slate-700 shadow-sm flex flex-col justify-center items-center text-center">
-                  <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1">Saídas (Local Atual)</span>
-                  <span className="text-2xl font-black text-rose-600 dark:text-rose-400">-{books.reduce((sum, b) => sum + b.out, 0)}</span>
+                  <span className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest mb-1">Saídas (Local Atual)</span>
+                  <span className="text-2xl font-black text-rose-600 dark:text-rose-300">-{books.reduce((sum, b) => sum + b.out, 0)}</span>
                 </div>
               </div>
 
@@ -2692,8 +3598,15 @@ export default function App() {
                           ))}
                         </Pie>
                         <RechartsTooltip 
-                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)' }}
-                          itemStyle={{ fontSize: '13px', fontWeight: 'bold' }}
+                          contentStyle={{
+                            backgroundColor: darkMode ? '#0f172a' : '#ffffff',
+                            color: darkMode ? '#f8fafc' : '#0f172a',
+                            borderRadius: '16px',
+                            border: darkMode ? '1px solid #334155' : '1px solid #e2e8f0',
+                            boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)'
+                          }}
+                          itemStyle={{ fontSize: '13px', fontWeight: 'bold', color: darkMode ? '#f8fafc' : '#0f172a' }}
+                          labelStyle={{ color: darkMode ? '#cbd5e1' : '#334155', fontWeight: 'bold' }}
                           formatter={(value: number) => [`${value} unidades`, 'Stock']}
                         />
                       </PieChart>
@@ -2713,12 +3626,19 @@ export default function App() {
                         Stock: books.filter(b => b.loc === loc).reduce((sum, b) => sum + getAvail(b), 0)
                       })).filter(l => l.Stock > 0)}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" opacity={0.5} />
-                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#94a3b8' }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#94a3b8' }} dx={-10} />
+                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: darkMode ? '#cbd5e1' : '#64748b' }} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: darkMode ? '#cbd5e1' : '#64748b' }} dx={-10} />
                         <RechartsTooltip 
-                          cursor={{ fill: 'rgba(99, 102, 241, 0.05)' }}
-                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)' }}
-                          itemStyle={{ fontSize: '13px', fontWeight: 'bold' }}
+                          cursor={{ fill: 'rgba(99, 102, 241, 0.08)' }}
+                          contentStyle={{
+                            backgroundColor: darkMode ? '#0f172a' : '#ffffff',
+                            color: darkMode ? '#f8fafc' : '#0f172a',
+                            borderRadius: '16px',
+                            border: darkMode ? '1px solid #334155' : '1px solid #e2e8f0',
+                            boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)'
+                          }}
+                          itemStyle={{ fontSize: '13px', fontWeight: 'bold', color: darkMode ? '#f8fafc' : '#0f172a' }}
+                          labelStyle={{ color: darkMode ? '#cbd5e1' : '#334155', fontWeight: 'bold' }}
                           formatter={(value: number) => [`${value} unidades`, 'Stock']}
                         />
                         <Bar 
@@ -2759,12 +3679,12 @@ export default function App() {
                 hidden: { opacity: 0, y: 15 },
                 visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 25 } }
               }}
-              className="space-y-2 bg-gradient-to-r from-indigo-500/5 to-teal-500/5 dark:from-indigo-500/10 dark:to-teal-500/10 p-4 rounded-2xl border border-slate-100 dark:border-slate-850 shadow-sm relative overflow-hidden"
+              className="space-y-2 bg-gradient-to-r from-indigo-500/5 to-teal-500/5 dark:from-indigo-500/10 dark:to-teal-500/10 p-4 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm relative overflow-hidden"
             >
               <div className="absolute right-2 top-2 text-indigo-500/10 pointer-events-none">
                 <Search className="w-16 h-16 transform rotate-12" />
               </div>
-              <label className="text-[10px] font-black text-indigo-600 dark:text-indigo-400 uppercase tracking-widest pl-1 flex items-center gap-1.5">
+              <label className="text-[10px] font-black text-indigo-600 dark:text-indigo-300 uppercase tracking-widest pl-1 flex items-center gap-1.5">
                 <span className="flex h-2 w-2 relative">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
                   <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
@@ -2774,18 +3694,18 @@ export default function App() {
               <div className="relative">
                 <select 
                   onChange={handleCopyFromExisting}
-                  className="w-full px-4 py-3 text-xs bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 rounded-xl border border-slate-200 dark:border-slate-700 outline-none focus:ring-2 focus:ring-indigo-500 appearance-none shadow-sm font-bold cursor-pointer transition-all"
+                  className="w-full px-4 py-3 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border border-slate-300 dark:border-slate-500 outline-none focus:ring-2 focus:ring-indigo-500 appearance-none shadow-sm font-bold cursor-pointer transition-all"
                 >
                   <option value="">-- Selecione para preencher --</option>
                   {uniqueBooks.map(b => (
                     <option key={b.code} value={b.code}>{b.code.toUpperCase()} — {b.name}</option>
                   ))}
                 </select>
-                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-400">
+                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500 dark:text-slate-300">
                   <ChevronRight className="w-4 h-4 transform rotate-90" />
                 </div>
               </div>
-              <p className="text-[9px] text-slate-455 dark:text-slate-500 pl-1">Escolha um item cadastrado para clonar o nome, código e categoria instantaneamente.</p>
+              <p className="text-[9px] text-slate-600 dark:text-slate-300 pl-1">Escolha um item cadastrado para clonar o nome, código e categoria instantaneamente.</p>
             </motion.div>
           )}
 
@@ -2797,15 +3717,15 @@ export default function App() {
             }}
             className="space-y-1.5"
           >
-            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-slate-500 pl-1 block">Visualização no Painel (Tempo Real)</span>
-            <div className={`relative px-4 py-4 rounded-2xl border bg-white dark:bg-slate-900/60 transition-all duration-550 overflow-hidden ${
+            <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-slate-300 pl-1 block">Visualização no Painel (Tempo Real)</span>
+            <div className={`relative px-4 py-4 rounded-2xl border bg-white dark:bg-slate-900/70 transition-all duration-550 overflow-hidden ${
               (formData.origin + formData.in - formData.out) <= lowStockThreshold 
-                ? 'border-orange-200 dark:border-orange-500/25 bg-orange-50/5' 
-                : 'border-slate-150 dark:border-slate-800 shadow-sm'
-            } ${copiedFlash ? 'ring-2 ring-emerald-500/60 border-emerald-500 dark:ring-cyan-550/60 scale-[1.01] bg-emerald-50/5 dark:bg-cyan-500/5' : ''}`}>
+                ? 'border-orange-200 dark:border-orange-500/35 bg-orange-50/5' 
+                : 'border-slate-200 dark:border-slate-700 shadow-sm'
+            } ${copiedFlash ? 'ring-2 ring-emerald-500/60 border-emerald-500 dark:ring-cyan-500/60 scale-[1.01] bg-emerald-50/5 dark:bg-cyan-500/5' : ''}`}>
               <div className={`absolute left-0 top-0 bottom-0 w-[5px] ${getCatColor(formData.category || 'Bíblias')} bg-opacity-90 z-10 transition-colors duration-300`} />
               <div className="flex items-start z-10">
-                <div className="w-10 h-10 rounded-full bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-800 flex items-center justify-center text-slate-500 shrink-0">
+                <div className="w-10 h-10 rounded-full bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-300 shrink-0">
                   {CAT_META[formData.category as Category]?.icon || <Book className="w-4 h-4" />}
                 </div>
                 <div className="ml-3 flex-1 min-w-0 pr-2">
@@ -2815,23 +3735,23 @@ export default function App() {
                       <AlertTriangle className="w-3.5 h-3.5 text-orange-500 shrink-0 animate-bounce" />
                     )}
                   </h4>
-                  <p className="text-[11px] font-mono font-medium text-slate-400 dark:text-slate-500 truncate mt-1 tracking-wider uppercase">
+                  <p className="text-[11px] font-mono font-medium text-slate-500 dark:text-slate-300 truncate mt-1 tracking-wider uppercase">
                     {formData.code.trim().toLowerCase() || 'código'} • {formData.category || 'Categoria'}
                   </p>
                 </div>
                 <div className="flex flex-col items-end shrink-0 ml-1">
-                  <span className={`text-[9px] uppercase font-black tracking-wider ${(formData.origin + formData.in - formData.out) <= lowStockThreshold ? 'text-orange-500/90 font-black' : 'text-slate-400'}`}>Disp.</span>
+                  <span className={`text-[9px] uppercase font-black tracking-wider ${(formData.origin + formData.in - formData.out) <= lowStockThreshold ? 'text-orange-600 dark:text-orange-300 font-black' : 'text-slate-500 dark:text-slate-300'}`}>Disp.</span>
                   <span className={`line-none text-2xl font-black mt-1 ${
                     (formData.origin + formData.in - formData.out) <= 0 
-                      ? 'text-rose-500' 
-                      : ((formData.origin + formData.in - formData.out) <= lowStockThreshold ? 'text-orange-600 dark:text-orange-400' : 'text-slate-900 dark:text-slate-100')
+                      ? 'text-rose-600 dark:text-rose-400' 
+                      : ((formData.origin + formData.in - formData.out) <= lowStockThreshold ? 'text-orange-600 dark:text-orange-300' : 'text-slate-900 dark:text-slate-100')
                   }`}>
                     {formData.origin + formData.in - formData.out}
                   </span>
-                  <div className="flex items-center gap-1.5 mt-2 bg-slate-105/80 dark:bg-slate-850/80 px-2 py-0.5 rounded-md text-[9px] font-bold font-mono">
-                    <span className="text-emerald-600 dark:text-emerald-400">+{formData.in}</span>
-                    <span className="text-slate-300 dark:text-slate-650">|</span>
-                    <span className="text-orange-500 dark:text-orange-400">-{formData.out}</span>
+                  <div className="flex items-center gap-1.5 mt-2 bg-slate-100/80 dark:bg-slate-800/90 px-2 py-0.5 rounded-md text-[9px] font-bold font-mono">
+                    <span className="text-emerald-600 dark:text-emerald-300">+{formData.in}</span>
+                    <span className="text-slate-400 dark:text-slate-400">|</span>
+                    <span className="text-orange-600 dark:text-orange-300">-{formData.out}</span>
                   </div>
                 </div>
               </div>
@@ -2844,16 +3764,16 @@ export default function App() {
               hidden: { opacity: 0, y: 15 },
               visible: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 25 } }
             }}
-            className={`bg-white dark:bg-slate-900/50 border rounded-2xl p-4.5 space-y-4 transition-all duration-500 ${
+            className={`bg-white dark:bg-slate-900/60 border rounded-2xl p-4.5 space-y-4 transition-all duration-500 ${
               copiedFlash 
                 ? 'border-emerald-400 dark:border-emerald-500 ring-2 ring-emerald-500/10 shadow-md' 
-                : 'border-slate-200 dark:border-slate-800 shadow-sm'
+                : 'border-slate-200 dark:border-slate-700 shadow-sm'
             }`}
           >
             <div className="space-y-1.5">
-              <label className="text-[10px] font-black text-slate-455 dark:text-slate-500 uppercase tracking-widest pl-1">Nome do Livro</label>
+              <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest pl-1">Nome do Livro</label>
               <div className="relative">
-                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 dark:text-slate-300">
                   <Book className="w-4 h-4" />
                 </div>
                 <input 
@@ -2861,22 +3781,22 @@ export default function App() {
                   value={formData.name}
                   readOnly={deleteLocked && !!editId}
                   onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  className={`w-full pl-10 pr-4 py-3 text-xs bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-bold ${
+                  className={`w-full pl-10 pr-4 py-3 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-bold ${
                     formErrors.name 
-                      ? 'border-rose-500 dark:border-rose-500 ring-1 ring-rose-500' 
-                      : 'border-slate-200 dark:border-slate-800 focus:border-indigo-500 dark:focus:border-[#00897b] focus:ring-4 focus:ring-indigo-500/10'
-                  } outline-none transition-all placeholder-slate-400/80`}
+                      ? 'border-rose-500 dark:border-rose-400 ring-1 ring-rose-500' 
+                      : 'border-slate-300 dark:border-slate-500 focus:border-indigo-500 dark:focus:border-emerald-400 focus:ring-4 focus:ring-indigo-500/15'
+                  } outline-none transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400`}
                   placeholder="Ex: Tradução do Novo Mundo"
                 />
               </div>
-              {formErrors.name && <p className="text-rose-500 text-[10px] font-bold pl-1.5">{formErrors.name}</p>}
+              {formErrors.name && <p className="text-rose-500 dark:text-rose-300 text-[10px] font-bold pl-1.5">{formErrors.name}</p>}
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <label className="text-[10px] font-black text-slate-455 dark:text-slate-500 uppercase tracking-widest pl-1">Código</label>
+                <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest pl-1">Código</label>
                 <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 dark:text-slate-300">
                     <FileText className="w-4 h-4" />
                   </div>
                   <input 
@@ -2884,38 +3804,38 @@ export default function App() {
                     value={formData.code}
                     readOnly={deleteLocked && !!editId}
                     onChange={(e) => setFormData(prev => ({ ...prev, code: e.target.value }))}
-                    className={`w-full pl-10 pr-4 py-3 text-xs bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-mono font-bold ${
+                    className={`w-full pl-10 pr-4 py-3 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-mono font-bold ${
                       formErrors.code 
-                        ? 'border-rose-500 dark:border-rose-500 ring-1 ring-rose-500' 
-                        : 'border-slate-200 dark:border-slate-800 focus:border-indigo-500 dark:focus:border-[#00897b] focus:ring-4 focus:ring-indigo-500/10'
-                    } outline-none transition-all placeholder-slate-400/85`}
+                        ? 'border-rose-500 dark:border-rose-400 ring-1 ring-rose-500' 
+                        : 'border-slate-300 dark:border-slate-500 focus:border-indigo-500 dark:focus:border-emerald-400 focus:ring-4 focus:ring-indigo-500/15'
+                    } outline-none transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400`}
                     placeholder="Ex: nwt"
                   />
                 </div>
-                {formErrors.code && <p className="text-rose-500 text-[10px] font-bold pl-1.5">{formErrors.code}</p>}
+                {formErrors.code && <p className="text-rose-500 dark:text-rose-300 text-[10px] font-bold pl-1.5">{formErrors.code}</p>}
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-[10px] font-black text-slate-455 dark:text-slate-500 uppercase tracking-widest pl-1">Categoria</label>
+                <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest pl-1">Categoria</label>
                 <div className="relative">
                   <select 
                     value={formData.category}
                     disabled={deleteLocked && !!editId}
                     onChange={(e) => setFormData(prev => ({ ...prev, category: e.target.value as Category }))}
-                    className={`w-full pl-3.5 pr-8 py-3 text-xs bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-bold ${
+                    className={`w-full pl-3.5 pr-8 py-3 text-xs bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 rounded-xl border font-bold ${
                       formErrors.category 
-                        ? 'border-rose-500 ring-1 ring-rose-500' 
-                        : 'border-slate-200 dark:border-slate-800 focus:border-[#00897b] focus:ring-4 focus:ring-indigo-500/10'
+                        ? 'border-rose-500 dark:border-rose-400 ring-1 ring-rose-500' 
+                        : 'border-slate-300 dark:border-slate-500 focus:border-[#00897b] dark:focus:border-emerald-400 focus:ring-4 focus:ring-indigo-500/15'
                     } outline-none appearance-none transition-all cursor-pointer`}
                   >
                     <option value="">Selecionar...</option>
                     {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
-                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-400">
+                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500 dark:text-slate-300">
                     <ChevronRight className="w-3.5 h-3.5 transform rotate-90" />
                   </div>
                 </div>
-                {formErrors.category && <p className="text-rose-500 text-[10px] font-bold pl-1.5">{formErrors.category}</p>}
+                {formErrors.category && <p className="text-rose-500 dark:text-rose-300 text-[10px] font-bold pl-1.5">{formErrors.category}</p>}
               </div>
             </div>
           </motion.div>
@@ -2965,7 +3885,7 @@ export default function App() {
               disabled={isSaving}
               className={`w-full py-4 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer ${
                 isSaving
-                  ? 'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500 cursor-not-allowed'
+                  ? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300 cursor-not-allowed'
                   : 'bg-slate-900 dark:bg-cyan-600 text-white shadow-lg hover:scale-[1.01] active:scale-[0.99] hover:shadow-xl'
               }`}
             >
@@ -2983,37 +3903,82 @@ export default function App() {
 
       {/* PIN Dialog */}
       <Modal show={showPinDialog} onClose={() => { setShowPinDialog(false); setPinInput(''); setPinError(''); }} title="Segurança do Sistema" maxWidth="max-w-xs">
-        <div className="p-6 space-y-5 text-center bg-white dark:bg-slate-800">
-          <div className="w-14 h-14 bg-gradient-to-tr from-cyan-500 to-blue-500 text-white rounded-2xl flex items-center justify-center mx-auto shadow-lg shadow-cyan-200 dark:shadow-none mb-2">
-            <Lock className="w-7 h-7" />
+        <div className="p-6 space-y-6 text-center bg-white dark:bg-slate-800 transition-colors duration-200">
+          <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto transition-all duration-300 border shadow-inner ${
+            pinError 
+              ? 'bg-rose-50 dark:bg-rose-950/25 border-rose-200 dark:border-rose-800/60 text-rose-500 animate-bounce' 
+              : pinInput.length === 4 
+              ? 'bg-emerald-50 dark:bg-emerald-950/25 border-emerald-200 dark:border-emerald-800/60 text-emerald-500' 
+              : 'bg-teal-50 dark:bg-teal-950/25 border-teal-100 dark:border-teal-900/30 text-[#00897b] dark:text-emerald-400'
+          }`}>
+            <Lock className="w-6 h-6" />
           </div>
-          <div className="space-y-1">
-            <h4 className="font-bold text-slate-800 dark:text-slate-100 text-lg">Zona Restrita</h4>
-            <p className="text-xs text-slate-500 dark:text-slate-400">Insira o seu PIN de 4 dígitos para efetuar edições estruturais e remoções.</p>
+          
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-black tracking-widest text-[#00897b] dark:text-emerald-400 uppercase">Segurança do Sistema</span>
+            <h4 className="font-extrabold text-slate-800 dark:text-slate-100 text-base">Acesso Restrito</h4>
+            <p className="text-[11.5px] text-slate-500 dark:text-slate-400 leading-relaxed max-w-[240px] mx-auto">
+              Introduza o código PIN de 4 dígitos para confirmar a sua autorização administrativa e desbloquear alterações estruturais.
+            </p>
           </div>
-          <div className="space-y-2">
-            <input 
-              type="password"
-              maxLength={4}
-              value={pinInput}
-              onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ''))} // Ensure numeric only
-              className={`w-full text-center text-3xl font-mono tracking-[0.5em] py-3.5 bg-slate-50 dark:bg-slate-900/50 text-slate-900 dark:text-slate-100 rounded-xl border ${pinError ? 'border-rose-500 ring-2 ring-rose-500/20' : 'border-slate-200 dark:border-slate-700'} outline-none focus:ring-2 focus:ring-cyan-500 transition-all font-bold placeholder:text-slate-300 dark:placeholder:text-slate-700`}
-              placeholder="••••"
-              autoFocus
-            />
-            {pinError && <p className="text-rose-500 text-[11px] font-bold animate-pulse">{pinError}</p>}
-          </div>
-          <button 
-            onClick={handlePinSubmit}
-            disabled={pinInput.length !== 4}
-            className={`w-full py-3.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all mt-2 ${
-              pinInput.length === 4
-                ? 'bg-slate-900 dark:bg-cyan-600 text-white shadow-xl shadow-slate-200 dark:shadow-none hover:scale-[1.02] active:scale-[0.98]'
-                : 'bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-600 cursor-not-allowed'
-            }`}
+
+          <motion.div 
+            animate={pinError ? { x: [-10, 10, -10, 10, -5, 5, 0] } : {}}
+            transition={{ duration: 0.4, ease: "easeInOut" }}
+            className="flex justify-center items-center gap-4 py-2"
           >
-            Confirmar Acesso
-          </button>
+            {[0, 1, 2, 3].map((index) => {
+              const isFilled = pinInput.length > index;
+              return (
+                <div 
+                  key={index}
+                  className={`w-3.5 h-3.5 rounded-full transition-all duration-300 ${
+                    pinError 
+                      ? 'bg-rose-500 shadow-md shadow-rose-500/40 scale-100' 
+                      : isFilled 
+                      ? 'bg-[#00897b] dark:bg-emerald-400 shadow-md shadow-[#00897b]/40 scale-110' 
+                      : 'border-2 border-slate-300 dark:border-slate-700 bg-slate-100/30 dark:bg-slate-800/10'
+                  }`}
+                />
+              );
+            })}
+          </motion.div>
+
+          <div className="h-5 flex items-center justify-center">
+            {pinError ? (
+              <p className="text-rose-500 text-[10px] font-bold uppercase tracking-wider animate-pulse">{pinError}</p>
+            ) : pinInput.length === 4 ? (
+              <p className="text-emerald-500 text-[10px] font-bold uppercase tracking-wider animate-pulse">A validar...</p>
+            ) : (
+              <p className="text-slate-500 dark:text-slate-300 text-[10px] font-medium tracking-wide">Pode digitar usando o teclado ou clicar abaixo</p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-3.5 max-w-[210px] mx-auto pt-2">
+            {['1', '2', '3', '4', '5', '6', '7', '8', '9', 'C', '0', '⌫'].map((key) => {
+              const isAction = key === 'C' || key === '⌫';
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleVirtualKeyPress(key)}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-base transition-all duration-150 select-none cursor-pointer ${
+                    isAction
+                      ? key === 'C'
+                        ? 'text-slate-500 dark:text-slate-300 hover:text-rose-500 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/30 active:scale-90'
+                        : 'text-slate-500 dark:text-slate-300 hover:text-amber-500 dark:hover:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/30 active:scale-90'
+                      : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-100 border border-slate-200/60 dark:border-slate-600 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 hover:border-slate-300 dark:hover:border-slate-500 active:scale-90'
+                  }`}
+                >
+                  {key === '⌫' ? (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M3 12l6.414 6.414a2 2 0 001.414.586H19a2 2 0 002-2V7a2 2 0 00-2-2h-7.172a2 2 0 00-1.414.586L3 12z" />
+                    </svg>
+                  ) : key}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </Modal>
 
@@ -3081,9 +4046,9 @@ export default function App() {
           </div>
 
           <div className="space-y-2">
-            <div className="flex justify-between items-center text-[10px] font-bold text-slate-400 tracking-wider uppercase pl-0.5">
+            <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 dark:text-slate-300 tracking-wider uppercase pl-0.5">
               <span>Progresso</span>
-              <span className="text-cyan-600 dark:text-cyan-400 font-mono">{cloudBackupProgress}%</span>
+              <span className="text-cyan-600 dark:text-cyan-300 font-mono">{cloudBackupProgress}%</span>
             </div>
             
             {/* Visual Progress Bar Frame */}
@@ -3097,7 +4062,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="text-[9px] font-medium text-slate-400 dark:text-slate-500 italic">
+          <div className="text-[9px] font-medium text-slate-500 dark:text-slate-300 italic">
             Por favor, não feche o navegador durante esta operação.
           </div>
         </div>
@@ -3116,15 +4081,15 @@ export default function App() {
           
           <div className="space-y-1">
             <h4 className="font-bold text-slate-800 dark:text-slate-100 text-base">A Importar Dados</h4>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 min-h-[32px] font-medium transition-all px-2 leading-relaxed">
+            <p className="text-[11px] text-slate-500 dark:text-slate-300 min-h-[32px] font-medium transition-all px-2 leading-relaxed">
               {importStatusText}
             </p>
           </div>
 
           <div className="space-y-2">
-            <div className="flex justify-between items-center text-[10px] font-bold text-slate-400 tracking-wider uppercase pl-0.5">
+            <div className="flex justify-between items-center text-[10px] font-bold text-slate-500 dark:text-slate-300 tracking-wider uppercase pl-0.5">
               <span>Progresso</span>
-              <span className="text-emerald-600 dark:text-emerald-400 font-mono">{importProgress}%</span>
+              <span className="text-emerald-600 dark:text-emerald-300 font-mono">{importProgress}%</span>
             </div>
             
             {/* Visual Progress Bar Frame */}
@@ -3138,7 +4103,7 @@ export default function App() {
             </div>
           </div>
 
-          <div className="text-[9px] font-medium text-slate-400 dark:text-slate-500 italic">
+          <div className="text-[9px] font-medium text-slate-500 dark:text-slate-300 italic">
             Por favor, não mude de página nem feche o navegador durante esta operação.
           </div>
         </div>
@@ -3216,7 +4181,7 @@ export default function App() {
                     return { ...prev, amount: finalAmount };
                   });
                 }}
-                className="w-24 h-14 text-center font-bold text-2xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 shadow-inner [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
+                className="w-24 h-14 text-center font-bold text-2xl bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 border border-slate-300 dark:border-slate-500 rounded-xl focus:ring-2 focus:ring-cyan-500 focus:border-cyan-500 shadow-inner [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
               />
               
               <button 
@@ -3298,17 +4263,17 @@ export default function App() {
                 <div className="flex items-center justify-between p-5 bg-white dark:bg-slate-800 shadow-sm border border-slate-100 dark:border-slate-700 rounded-2xl relative overflow-hidden">
                   <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/5 dark:bg-emerald-500/10 rounded-bl-full -z-10" />
                   <div>
-                    <h4 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-1.5 focus:outline-none">Total Disponível</h4>
+                    <h4 className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest mb-1.5 focus:outline-none">Total Disponível</h4>
                     <div className="flex items-end gap-3 relative">
                       <p className="text-4xl font-black text-slate-900 dark:text-slate-100 leading-none tracking-tighter">{detailBookInfo.currentTotal}</p>
                       <div className="mb-1"><StockBadge value={detailBookInfo.currentTotal} threshold={lowStockThreshold} /></div>
                     </div>
                   </div>
-                  <Package className="w-10 h-10 text-slate-200 dark:text-slate-700" />
+                  <Package className="w-10 h-10 text-slate-300 dark:text-slate-400" />
                 </div>
 
                 <div className="space-y-3">
-                  <h4 className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <h4 className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-widest flex items-center gap-2">
                     <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
                     Distribuição Local {isLive ? `(${curMonthKey})` : ''}
                   </h4>
@@ -3316,17 +4281,17 @@ export default function App() {
                     {Object.entries(detailBookInfo.currentLocs).map(([loc, qty]) => (
                       <div key={loc} className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-100 dark:border-slate-700 shadow-sm flex flex-col gap-1 relative overflow-hidden group">
                         <div className={`absolute top-0 left-0 w-1 h-full ${Number(qty) > 0 ? 'bg-cyan-500' : 'bg-slate-300 dark:bg-slate-600'}`} />
-                        <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest pl-2 truncate">{loc}</span>
-                        <span className="text-2xl font-black text-slate-700 dark:text-slate-200 pl-2 tracking-tight">{Number(qty)}</span>
+                        <span className="text-[10px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-widest pl-2 truncate">{loc}</span>
+                        <span className="text-2xl font-black text-slate-700 dark:text-slate-100 pl-2 tracking-tight">{Number(qty)}</span>
                       </div>
                     ))}
                   </div>
                 </div>
 
                 <div className="space-y-3">
-                  <h4 className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                  <h4 className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-widest flex items-center gap-2">
                     <History className="w-3.5 h-3.5 text-indigo-400" />
-                    Últimas Alterações (Metadados)
+                    Últimas Alterações
                   </h4>
                   <div className="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-xl overflow-hidden shadow-sm">
                     {(() => {
@@ -3340,6 +4305,25 @@ export default function App() {
                         console.error("Error parsing modifications logs from book metadata:", e);
                       }
 
+                      const formatWho = (who: string): string => {
+                        if (!who) return 'Anónimo';
+                        if (who.includes('@')) {
+                          const localPart = who.split('@')[0];
+                          if (localPart.toLowerCase() === 'derciojaimebalane21' || localPart.toLowerCase() === 'derciojaimebalane') {
+                            return 'Dércio Jaime Balane';
+                          }
+                          return localPart
+                            .split(/[\._-]/)
+                            .map(word => {
+                              if (!word) return '';
+                              return word.charAt(0).toUpperCase() + word.slice(1);
+                            })
+                            .filter(Boolean)
+                            .join(' ');
+                        }
+                        return who;
+                      };
+
                       if (parsedLogs && parsedLogs.length > 0) {
                         return (
                           <div className="divide-y divide-slate-50 dark:divide-slate-700/50">
@@ -3349,14 +4333,16 @@ export default function App() {
                               return (
                                 <div key={idx} className="p-4 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                                   <div className="flex flex-col gap-0.5">
-                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-200 truncate max-w-[190px] sm:max-w-[240px]" title={log.who}>{log.who}</span>
-                                    <span className="text-[10px] font-medium text-slate-400 dark:text-slate-500">{dateFormatted}</span>
+                                    <span className="text-xs font-bold text-slate-700 dark:text-slate-100 truncate max-w-[190px] sm:max-w-[240px]" title={log.who}>
+                                      {formatWho(log.who)}
+                                    </span>
+                                    <span className="text-[10px] font-medium text-slate-500 dark:text-slate-300">{dateFormatted}</span>
                                   </div>
                                   <div className="flex items-center gap-2 self-start sm:self-center">
                                     <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded-full ${
                                       log.type === 'Entrada' 
-                                        ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' 
-                                        : 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                                        ? 'bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' 
+                                        : 'bg-amber-50 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300'
                                     }`}>
                                       {log.type}
                                     </span>
@@ -3371,7 +4357,7 @@ export default function App() {
                         );
                       } else {
                         return (
-                          <div className="p-6 text-center text-xs font-medium text-slate-400 dark:text-slate-500 bg-slate-50/50 dark:bg-slate-900/50">
+                          <div className="p-6 text-center text-xs font-medium text-slate-500 dark:text-slate-300 bg-slate-50/50 dark:bg-slate-900/50">
                             Nenhum registo de alteração recente nas últimas operações.
                           </div>
                         );
@@ -3382,14 +4368,14 @@ export default function App() {
 
                 <div className="space-y-3 pb-4">
                   <div className="flex justify-between items-center">
-                    <h4 className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-widest flex items-center gap-2">
+                    <h4 className="text-[11px] font-bold text-slate-600 dark:text-slate-300 uppercase tracking-widest flex items-center gap-2">
                       <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full" />
                       Histórico Movimentos
                     </h4>
                     <button 
                       onClick={() => loadAllHistory()} 
                       disabled={syncing}
-                      className="text-[10px] uppercase font-bold tracking-widest text-emerald-600 dark:text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-300 disabled:opacity-50"
+                      className="text-[10px] uppercase font-bold tracking-widest text-emerald-600 dark:text-emerald-300 hover:text-emerald-700 dark:hover:text-emerald-200 disabled:opacity-50"
                     >
                       {syncing ? 'A carregar...' : 'Carregar Tudo'}
                     </button>
@@ -3400,29 +4386,29 @@ export default function App() {
                         {detailBookInfo.movementHistory.map((m, i) => (
                            <div key={i} className="p-4 hover:bg-slate-50/50 dark:hover:bg-slate-700/20 transition-colors flex items-center justify-between">
                               <div className="flex flex-col gap-1">
-                                <span className="text-xs font-bold text-slate-700 dark:text-slate-200">{m.month}</span>
-                                <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{m.loc}</span>
+                                <span className="text-xs font-bold text-slate-700 dark:text-slate-100">{m.month}</span>
+                                <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-300 uppercase tracking-wider">{m.loc}</span>
                               </div>
                               <div className="flex items-center gap-4">
                                 <div className="flex flex-col items-end">
-                                  <span className="text-[9px] uppercase font-bold text-slate-400">Var</span>
+                                  <span className="text-[9px] uppercase font-bold text-slate-500 dark:text-slate-300">Var</span>
                                   <div className="flex items-center gap-1.5 text-xs font-semibold">
-                                    {m.in > 0 && <span className="text-emerald-500 flex items-center"><Plus className="w-2.5 h-2.5" />{m.in}</span>}
-                                    {m.out > 0 && <span className="text-rose-500 flex items-center"><Minus className="w-2.5 h-2.5" />{m.out}</span>}
-                                    {m.in === 0 && m.out === 0 && <span className="text-slate-300">-</span>}
+                                    {m.in > 0 && <span className="text-emerald-600 dark:text-emerald-300 flex items-center"><Plus className="w-2.5 h-2.5" />{m.in}</span>}
+                                    {m.out > 0 && <span className="text-rose-600 dark:text-rose-300 flex items-center"><Minus className="w-2.5 h-2.5" />{m.out}</span>}
+                                    {m.in === 0 && m.out === 0 && <span className="text-slate-400 dark:text-slate-300">-</span>}
                                   </div>
                                 </div>
                                 <div className="w-px h-6 bg-slate-100 dark:bg-slate-700" />
                                 <div className="flex flex-col items-end min-w-[32px]">
-                                   <span className="text-[9px] uppercase font-bold text-slate-400">Tot</span>
-                                   <span className="text-sm font-black text-slate-700 dark:text-slate-200">{m.available}</span>
+                                   <span className="text-[9px] uppercase font-bold text-slate-500 dark:text-slate-300">Tot</span>
+                                   <span className="text-sm font-black text-slate-700 dark:text-slate-100">{m.available}</span>
                                 </div>
                               </div>
                            </div>
                         ))}
                       </div>
                     ) : (
-                      <div className="p-6 text-center text-xs font-medium text-slate-400 dark:text-slate-500 bg-slate-50/50 dark:bg-slate-900/50">Sem movimentos neste registo.</div>
+                      <div className="p-6 text-center text-xs font-medium text-slate-500 dark:text-slate-300 bg-slate-50/50 dark:bg-slate-900/50">Sem movimentos neste registo.</div>
                     )}
                   </div>
                 </div>
@@ -3439,7 +4425,7 @@ export default function App() {
       </Modal>
 
     </div>
-    <PrintLayout books={filteredBooks} location={activeLocation} month={viewMonth} />
+    <PrintLayout books={filteredBooks} location={activeLocation} month={viewMonth} user={user} />
     </>
   );
 }
@@ -3461,7 +4447,7 @@ function SummaryCard({ label, value, icon, color }: { label: string; value: numb
         {icon}
       </div>
       <div>
-        <div className="text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{label}</div>
+        <div className="text-[9px] font-bold text-slate-500 dark:text-slate-300 uppercase tracking-wider">{label}</div>
         <div className="text-lg font-bold text-slate-900 dark:text-slate-100">{value}</div>
       </div>
     </div>
@@ -3469,17 +4455,17 @@ function SummaryCard({ label, value, icon, color }: { label: string; value: numb
 }
 
 function StockBadge({ value, threshold }: { value: number; threshold: number }) {
-  if (value === 0) return <span className="px-1.5 py-0.5 bg-rose-100 text-rose-700 text-[9px] font-bold rounded-md uppercase tracking-tighter">Esgotado</span>;
-  if (value <= threshold) return <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 text-[9px] font-bold rounded-md uppercase tracking-tighter">Baixo</span>;
-  return <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-bold rounded-md uppercase tracking-tighter">OK</span>;
+  if (value === 0) return <span className="px-1.5 py-0.5 bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-200 text-[9px] font-bold rounded-md uppercase tracking-tighter">Esgotado</span>;
+  if (value <= threshold) return <span className="px-1.5 py-0.5 bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-200 text-[9px] font-bold rounded-md uppercase tracking-tighter">Baixo</span>;
+  return <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200 text-[9px] font-bold rounded-md uppercase tracking-tighter">OK</span>;
 }
 
 function ActionButton({ onClick, icon, color, disabled = false, title }: { onClick: () => void; icon: React.ReactNode; color: string; disabled?: boolean; title?: string }) {
   const colors: Record<string, string> = {
-    green: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100',
-    orange: 'bg-amber-50 text-amber-600 hover:bg-amber-100',
-    blue: 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100',
-    red: 'bg-rose-50 text-rose-600 hover:bg-rose-100',
+    green: 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100 dark:bg-emerald-500/20 dark:text-emerald-300 dark:hover:bg-emerald-500/30',
+    orange: 'bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-500/20 dark:text-amber-300 dark:hover:bg-amber-500/30',
+    blue: 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100 dark:bg-cyan-500/20 dark:text-cyan-300 dark:hover:bg-cyan-500/30',
+    red: 'bg-rose-50 text-rose-600 hover:bg-rose-100 dark:bg-rose-500/20 dark:text-rose-300 dark:hover:bg-rose-500/30',
   };
 
   return (
@@ -3494,102 +4480,184 @@ function ActionButton({ onClick, icon, color, disabled = false, title }: { onCli
   );
 }
 
-function PrintLayout({ books, location, month }: { books: BookItem[]; location: string; month: string }) {
+function PrintLayout({ books, location, month, user }: { books: BookItem[]; location: string; month: string; user?: any }) {
   const getAvail = (b: BookItem) => b.origin + b.in - b.out;
+
+  const formatMonthName = (monthKey: string) => {
+    if (!monthKey) return '';
+    try {
+      const [year, monthNum] = monthKey.split('-');
+      const months = [
+        'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+        'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'
+      ];
+      const monthIndex = parseInt(monthNum, 10) - 1;
+      if (monthIndex >= 0 && monthIndex < 12) {
+        return `${months[monthIndex]} de ${year}`;
+      }
+    } catch (e) {
+      // ignore
+    }
+    return monthKey;
+  };
+
+  // Totals calculations
+  let totalMananga = 0;
+  let totalChota = 0;
+  let totalDisponivel = 0;
   
+  const totalMap = new Map<string, { code: string; name: string; category: string; mananga: number; chota: number; total: number }>();
+  if (location === 'Total') {
+    books.forEach(b => {
+      const avail = getAvail(b);
+      if (!totalMap.has(b.code)) {
+        totalMap.set(b.code, { code: b.code, name: b.name, category: b.category, mananga: 0, chota: 0, total: 0 });
+      }
+      const entry = totalMap.get(b.code)!;
+      if (b.loc.toUpperCase().includes('MANANGA')) {
+        entry.mananga += avail;
+      } else if (b.loc.toUpperCase().includes('CHOTA')) {
+        entry.chota += avail;
+      }
+      entry.total += avail;
+    });
+
+    Array.from(totalMap.values()).forEach(item => {
+      totalMananga += item.mananga;
+      totalChota += item.chota;
+      totalDisponivel += item.total;
+    });
+  }
+
+  let totalOrigin = 0;
+  let totalIn = 0;
+  let totalOut = 0;
+  let totalSingleDisponivel = 0;
+
+  if (location !== 'Total') {
+    books.forEach(b => {
+      totalOrigin += b.origin;
+      totalIn += b.in;
+      totalOut += b.out;
+      totalSingleDisponivel += getAvail(b);
+    });
+  }
+
+  const responsibleName = user?.displayName || user?.email || 'Operador Local';
+
   return (
-    <div className="hidden print:block bg-white text-black p-4 font-sans max-w-none w-full !m-0">
-      <div className="border border-black bg-white">
-        {/* Title row */}
-        <div className="bg-[#4472c4] text-white text-center py-4 border-b border-black print-color-adjust-exact">
-           <h1 className="text-2xl font-bold uppercase tracking-wider">Relatório de Inventário</h1>
+    <div className="hidden print:block bg-white text-black p-6 font-sans max-w-none w-full !m-0">
+      <div className="border border-slate-400 bg-white p-4 rounded-xl">
+        {/* Document Header */}
+        <div className="flex flex-col items-center justify-center border-b-2 border-slate-900 pb-4 mb-4 text-center">
+          <span className="text-[10px] font-black tracking-widest text-[#00897b] uppercase">Sistema de Gestão de Inventário de Literatura</span>
+          <h1 className="text-xl font-bold uppercase tracking-wider text-slate-950 mt-1">Relatório de Stock e Inventário</h1>
+          <div className="w-16 h-0.5 bg-[#00897b] mt-2"></div>
         </div>
         
-        {/* Metadata row */}
-        <div className="grid grid-cols-4 border-b border-black text-xs text-center font-bold">
-           <div className="p-2 border-r border-black uppercase bg-gray-50 print-color-adjust-exact">Data de Emissão</div>
-           <div className="p-2 border-r border-black font-normal">{DateUtils.formatDate()}</div>
-           <div className="p-2 border-r border-black uppercase bg-gray-50 print-color-adjust-exact">Mês de Registo</div>
-           <div className="p-2 font-normal capitalize">{month}</div>
-        </div>
-        <div className="grid grid-cols-4 border-b border-black text-xs text-center font-bold">
-           <div className="p-2 border-r border-black uppercase bg-gray-50 print-color-adjust-exact">Local / Unidade</div>
-           <div className="p-2 border-r border-black font-normal">{location}</div>
-           <div className="p-2 border-r border-black uppercase bg-gray-50 print-color-adjust-exact">Responsável</div>
-           <div className="p-2 font-normal"></div>
+        {/* Metadata Panel */}
+        <div className="grid grid-cols-4 border border-slate-300 rounded-lg text-xs font-semibold mb-6 overflow-hidden">
+          <div className="p-2 border-r border-b border-slate-300 uppercase bg-slate-50 text-slate-600 print-color-adjust-exact text-[10px] tracking-wider">Data de Emissão</div>
+          <div className="p-2 border-r border-b border-slate-300 text-slate-800 font-normal">{DateUtils.formatDate()}</div>
+          <div className="p-2 border-r border-b border-slate-300 uppercase bg-slate-50 text-slate-600 print-color-adjust-exact text-[10px] tracking-wider">Mês de Registo</div>
+          <div className="p-2 border-b border-slate-300 text-slate-800 font-normal capitalize">{formatMonthName(month)}</div>
+          
+          <div className="p-2 border-r border-slate-300 uppercase bg-slate-50 text-slate-600 print-color-adjust-exact text-[10px] tracking-wider">Local / Unidade</div>
+          <div className="p-2 border-r border-slate-300 text-slate-800 font-normal">{location}</div>
+          <div className="p-2 border-r border-slate-300 uppercase bg-slate-50 text-slate-600 print-color-adjust-exact text-[10px] tracking-wider">Responsável</div>
+          <div className="p-2 text-slate-800 font-normal truncate">{responsibleName}</div>
         </div>
 
         {/* Data Table */}
-        <div className="p-2">
-          <table className="w-full text-center text-xs border-collapse">
+        <div className="overflow-x-auto">
+          <table className="w-full text-center text-[11px] border-collapse">
             <thead>
-                <tr className="bg-gray-100 uppercase text-[9px] print-color-adjust-exact">
-                    <th className="border border-black p-1">Código</th>
-                    <th className="border border-black p-1 text-left w-1/3">Nome do Livro</th>
-                    <th className="border border-black p-1">Cat</th>
-                    {location === 'Total' ? (
-                      <>
-                        <th className="border border-black p-1">Mananga PT</th>
-                        <th className="border border-black p-1">Chota PT</th>
-                      </>
-                    ) : (
-                      <>
-                        <th className="border border-black p-1 text-slate-500">Origem</th>
-                        <th className="border border-black p-1 text-blue-600">Ent</th>
-                        <th className="border border-black p-1 text-red-600">Saí</th>
-                      </>
-                    )}
-                    <th className="border border-black p-1 font-bold">Disponível</th>
-                </tr>
+              <tr className="bg-slate-100 border-b border-slate-800 uppercase text-[9px] font-black tracking-widest text-slate-700 print-color-adjust-exact">
+                <th className="border border-slate-300 py-2 px-1.5 w-16">Código</th>
+                <th className="border border-slate-300 py-2 px-1.5 text-left w-2/5">Nome do Livro</th>
+                <th className="border border-slate-300 py-2 px-1.5 w-20">Categoria</th>
+                {location === 'Total' ? (
+                  <>
+                    <th className="border border-slate-300 py-2 px-1.5 w-24">Mananga PT</th>
+                    <th className="border border-slate-300 py-2 px-1.5 w-24">Chota PT</th>
+                  </>
+                ) : (
+                  <>
+                    <th className="border border-slate-300 py-2 px-1.5 w-16 text-slate-600">Origem</th>
+                    <th className="border border-slate-300 py-2 px-1.5 w-16 text-emerald-700 font-black">Entrada</th>
+                    <th className="border border-slate-300 py-2 px-1.5 w-16 text-rose-700 font-black">Saída</th>
+                  </>
+                )}
+                <th className="border border-slate-300 py-2 px-1.5 font-bold w-24 bg-slate-50 print-color-adjust-exact">Disponível</th>
+              </tr>
             </thead>
             <tbody>
-                {location === 'Total' ? (() => {
-                   const map = new Map<string, { code: string; name: string; category: string; mananga: number; chota: number; total: number }>();
-                   books.forEach(b => {
-                     const avail = getAvail(b);
-                     if (!map.has(b.code)) map.set(b.code, { code: b.code, name: b.name, category: b.category, mananga: 0, chota: 0, total: 0 });
-                     const entry = map.get(b.code)!;
-                     if (b.loc.toUpperCase().includes('MANANGA')) entry.mananga += avail;
-                     else if (b.loc.toUpperCase().includes('CHOTA')) entry.chota += avail;
-                     entry.total += avail;
-                   });
-                   return Array.from(map.values()).map(b => (
-                    <tr key={`total-${b.code}`} className="border-b border-black/30">
-                        <td className="border border-black p-1 font-mono text-[10px]">{b.code}</td>
-                        <td className="border border-black p-1 text-left font-merriweather font-medium text-[13px]">{b.name}</td>
-                        <td className="border border-black p-1 text-[10px]">{b.category}</td>
-                        <td className="border border-black p-1 text-slate-700">{b.mananga}</td>
-                        <td className="border border-black p-1 text-slate-700">{b.chota}</td>
-                        <td className="border border-black p-1 font-bold text-sm bg-gray-50 print-color-adjust-exact">{b.total}</td>
-                    </tr>
-                   ));
-                })() : books.map(b => (
-                    <tr key={b.id} className="border-b border-black/30">
-                        <td className="border border-black p-1 font-mono text-[10px]">{b.code}</td>
-                        <td className="border border-black p-1 text-left font-merriweather font-medium text-[13px]">{b.name}</td>
-                        <td className="border border-black p-1 text-[10px]">{b.category}</td>
-                        <td className="border border-black p-1 text-slate-500">{b.origin}</td>
-                        <td className="border border-black p-1 text-blue-600">{b.in}</td>
-                        <td className="border border-black p-1 text-red-600">{b.out}</td>
-                        <td className="border border-black p-1 font-bold text-sm bg-gray-50 print-color-adjust-exact">{getAvail(b)}</td>
-                    </tr>
-                ))}
+              {location === 'Total' ? (
+                Array.from(totalMap.values()).map((b, idx) => (
+                  <tr key={`total-${b.code || 'item'}-${idx}`} className={`border-b border-slate-200 ${idx % 2 === 1 ? 'bg-slate-50/40 print-color-adjust-exact' : ''}`}>
+                    <td className="border border-slate-300 py-1.5 px-2 font-mono text-[9px] font-semibold tracking-wider text-slate-700 uppercase">{b.code}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 text-left font-serif font-bold text-slate-900 text-xs">{b.name}</td>
+                    <td className="border border-slate-300 py-1.5 px-2">
+                      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-500">{b.category}</span>
+                    </td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-medium text-slate-800">{b.mananga}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-medium text-slate-800">{b.chota}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-black text-[13px] bg-slate-50 text-slate-950 font-sans print-color-adjust-exact">{b.total}</td>
+                  </tr>
+                ))
+              ) : (
+                books.map((b, idx) => (
+                  <tr key={b.id || `print-${b.code}-${b.loc}-${idx}`} className={`border-b border-slate-200 ${idx % 2 === 1 ? 'bg-slate-50/40 print-color-adjust-exact' : ''}`}>
+                    <td className="border border-slate-300 py-1.5 px-2 font-mono text-[9px] font-semibold tracking-wider text-slate-700 uppercase">{b.code}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 text-left font-serif font-bold text-slate-900 text-xs">{b.name}</td>
+                    <td className="border border-slate-300 py-1.5 px-2">
+                      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-500">{b.category}</span>
+                    </td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-medium text-slate-500">{b.origin}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-medium text-emerald-700 font-semibold">{b.in > 0 ? `+${b.in}` : '0'}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-medium text-rose-700 font-semibold">{b.out > 0 ? `-${b.out}` : '0'}</td>
+                    <td className="border border-slate-300 py-1.5 px-2 font-black text-[13px] bg-slate-50 text-slate-950 font-sans print-color-adjust-exact">{getAvail(b)}</td>
+                  </tr>
+                ))
+              )}
             </tbody>
+            <tfoot>
+              <tr className="bg-slate-100 text-slate-900 border-2 border-slate-800 text-[10px] print-color-adjust-exact font-black font-sans uppercase">
+                <td colSpan={3} className="border border-slate-300 py-2.5 px-2 text-right tracking-wider">TOTAIS DE COLECÇÃO:</td>
+                {location === 'Total' ? (
+                  <>
+                    <td className="border border-slate-300 py-2.5 px-2 text-slate-900 text-xs">{totalMananga}</td>
+                    <td className="border border-slate-300 py-2.5 px-2 text-slate-900 text-xs">{totalChota}</td>
+                    <td className="border border-slate-300 py-2.5 px-2 text-slate-950 bg-slate-200/60 font-black text-sm print-color-adjust-exact">{totalDisponivel}</td>
+                  </>
+                ) : (
+                  <>
+                    <td className="border border-slate-300 py-2.5 px-2 text-slate-600 text-xs">{totalOrigin}</td>
+                    <td className="border border-slate-300 py-2.5 px-2 text-emerald-800 text-xs font-bold">+{totalIn}</td>
+                    <td className="border border-slate-300 py-2.5 px-2 text-rose-800 text-xs font-bold">-{totalOut}</td>
+                    <td className="border border-slate-300 py-2.5 px-2 text-slate-950 bg-slate-200/60 font-black text-sm print-color-adjust-exact">{totalSingleDisponivel}</td>
+                  </>
+                )}
+              </tr>
+            </tfoot>
           </table>
         </div>
 
         {/* Form Footer */}
-        <div className="border-t border-black p-4 text-xs mt-4">
+        <div className="border-t border-slate-300 p-2 text-[10px] mt-6 text-slate-500">
+           <div className="grid grid-cols-2 gap-12 mt-8 mb-4">
+              <div className="flex gap-2 items-end">
+                 <span className="font-bold shrink-0 text-slate-700">Assinatura do responsável:</span>
+                 <div className="border-b border-slate-400 flex-1 h-4"></div>
+              </div>
+              <div className="flex gap-2 items-end">
+                 <span className="font-bold shrink-0 text-slate-700">Data de Verificação:</span>
+                 <div className="border-b border-slate-400 flex-1 h-4"></div>
+              </div>
+           </div>
            
-           <div className="grid grid-cols-2 gap-8 mt-12 mb-4">
-              <div className="flex gap-2 items-end">
-                 <span className="font-bold shrink-0">Assinatura do responsável:</span>
-                 <div className="border-b border-black flex-1 h-4"></div>
-              </div>
-              <div className="flex gap-2 items-end">
-                 <span className="font-bold shrink-0">Data:</span>
-                 <div className="border-b border-black flex-1 h-4"></div>
-              </div>
+           <div className="text-center pt-8 border-t border-slate-100 mt-6 text-[8px] tracking-wider text-slate-400 uppercase font-medium">
+             Este documento constitui um registo oficial de controlo interno de stock de literatura.
            </div>
         </div>
       </div>
@@ -3616,7 +4684,7 @@ function StepperInput({
     switch (accentColor) {
       case "indigo": return "bg-[#6366f1] hover:bg-indigo-600 text-white shadow-sm shadow-indigo-100 dark:shadow-none";
       case "amber": return "bg-amber-500 hover:bg-amber-600 text-white shadow-sm shadow-amber-100 dark:shadow-none";
-      case "emerald": return "bg-emerald-600 hover:bg-emerald-750 text-white shadow-sm shadow-emerald-100 dark:shadow-none";
+      case "emerald": return "bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shadow-emerald-100 dark:shadow-none";
       default: return "bg-slate-600 hover:bg-slate-700 text-white shadow-sm";
     }
   };
@@ -3630,17 +4698,17 @@ function StepperInput({
   };
 
   return (
-    <div className={`p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col items-center justify-between min-h-[110px] transition-all duration-300 ${getCardBorder()}`}>
-      <span className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest flex items-center justify-center gap-1">
+    <div className={`p-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-600 rounded-2xl flex flex-col items-center justify-between min-h-[110px] transition-all duration-300 ${getCardBorder()}`}>
+      <span className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest flex items-center justify-center gap-1">
         <Icon className="w-3.5 h-3.5" />
         {label}
       </span>
-      <div className="flex items-center justify-between w-full mt-2 gap-1 bg-slate-50 dark:bg-slate-800/40 p-1.5 rounded-xl border border-slate-100 dark:border-slate-800">
+      <div className="flex items-center justify-between w-full mt-2 gap-1 bg-slate-50 dark:bg-slate-800 p-1.5 rounded-xl border border-slate-200 dark:border-slate-600">
         <button
           type="button"
           disabled={readOnly || value <= 0}
           onClick={() => onChange(Math.max(0, value - 1))}
-          className="w-7 h-7 rounded-lg flex items-center justify-center transition-all bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 active:scale-95 disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
+          className="w-7 h-7 rounded-lg flex items-center justify-center transition-all bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-slate-200 dark:border-slate-500 text-slate-700 dark:text-slate-100 active:scale-95 disabled:opacity-30 disabled:pointer-events-none cursor-pointer"
         >
           <Minus className="w-3.5 h-3.5" />
         </button>
@@ -3651,7 +4719,7 @@ function StepperInput({
           value={value}
           readOnly={readOnly}
           onChange={(e) => onChange(Math.max(0, parseInt(e.target.value) || 0))}
-          className="w-10 text-center text-xs font-black bg-transparent text-slate-850 dark:text-slate-100 outline-none select-all focus:ring-0 whitespace-nowrap"
+          className="w-10 text-center text-xs font-black bg-transparent text-slate-900 dark:text-slate-100 outline-none select-all focus:ring-0 whitespace-nowrap"
         />
 
         <button

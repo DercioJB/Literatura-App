@@ -1,8 +1,9 @@
+import 'dotenv/config';
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import { google } from "googleapis";
 import cookieParser from "cookie-parser";
 import path from "path";
+import dns from "dns";
 
 async function startServer() {
   const app = express();
@@ -10,6 +11,56 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
   app.use(cookieParser());
+
+  app.get("/api/supabase-status", async (_req, res) => {
+    const rawUrl = (process.env.VITE_SUPABASE_URL || "").trim();
+    const rawKey = (process.env.VITE_SUPABASE_ANON_KEY || "").trim();
+
+    if (!rawUrl || !rawKey || rawUrl.includes("placeholder.supabase.co") || rawKey === "placeholder_key") {
+      return res.json({ configured: false, reachable: false, code: "NOT_CONFIGURED" });
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return res.json({ configured: false, reachable: false, code: "INVALID_URL" });
+      }
+    } catch {
+      return res.json({ configured: false, reachable: false, code: "INVALID_URL" });
+    }
+
+    const hostname = parsed.hostname;
+    try {
+      await dns.promises.lookup(hostname);
+    } catch (err: any) {
+      return res.json({
+        configured: true,
+        reachable: false,
+        hostname,
+        code: err?.code || "ENOTFOUND",
+      });
+    }
+
+    try {
+      const healthRes = await fetch(`${parsed.origin}/auth/v1/health`, {
+        method: "GET",
+        headers: { apikey: rawKey },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (healthRes.status === 540) {
+        return res.json({ configured: true, reachable: false, hostname, code: "PROJECT_PAUSED" });
+      }
+      return res.json({ configured: true, reachable: true, hostname });
+    } catch (err: any) {
+      return res.json({
+        configured: true,
+        reachable: false,
+        hostname,
+        code: err?.cause?.code || err?.code || "UNREACHABLE",
+      });
+    }
+  });
 
   // Helper to build the redirect URI dynamically
   const getRedirectUri = (req: express.Request) => {
@@ -198,7 +249,8 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    const { createServer } = await import("vite");
+    const vite = await createServer({
       server: { 
         middlewareMode: true,
       },

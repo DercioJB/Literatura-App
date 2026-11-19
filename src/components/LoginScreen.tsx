@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { supabase } from '../supabase';
+import { checkSupabaseStatus, isSupabaseConfigured, supabase, SupabaseStatus } from '../supabase';
 import { 
   Mail, 
   Lock, 
@@ -12,10 +12,32 @@ import {
   ShieldCheck, 
   AlertCircle,
   Loader2,
-  Camera
+  Camera,
+  RefreshCw
 } from 'lucide-react';
 
-export default function LoginScreen() {
+interface LoginScreenProps {
+  supabaseStatus?: SupabaseStatus;
+  onRetryConnection?: () => Promise<SupabaseStatus>;
+}
+
+const getUnreachableMessage = (status: SupabaseStatus): string => {
+  if (!status.configured || status.code === 'NOT_CONFIGURED' || status.code === 'INVALID_URL') {
+    return 'A ligação ao Supabase ainda não está configurada neste ambiente. Defina as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.';
+  }
+  if (status.code === 'OFFLINE') {
+    return 'Sem ligação à internet. Verifique a sua rede e tente novamente.';
+  }
+  if (status.code === 'ENOTFOUND') {
+    return `O servidor Supabase configurado (${status.hostname || 'desconhecido'}) não foi encontrado (DNS ENOTFOUND). O projeto pode ter sido eliminado ou o URL está incorreto. Atualize VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY nas definições do ambiente.`;
+  }
+  if (status.code === 'PROJECT_PAUSED') {
+    return `O projeto Supabase (${status.hostname || ''}) encontra-se pausado. Reative-o no painel do Supabase para iniciar sessão.`;
+  }
+  return `Não foi possível contactar o servidor Supabase (${status.hostname || ''}). Verifique a sua ligação ou o estado do projeto.`;
+};
+
+export default function LoginScreen({ supabaseStatus, onRetryConnection }: LoginScreenProps) {
   const [view, setView] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -24,8 +46,15 @@ export default function LoginScreen() {
   
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const [localStatus, setLocalStatus] = useState<SupabaseStatus | undefined>(supabaseStatus);
   const [error, setError] = useState('');
   const [registrationSuccess, setRegistrationSuccess] = useState(false);
+
+  const effectiveStatus: SupabaseStatus = localStatus || supabaseStatus || {
+    configured: isSupabaseConfigured,
+    reachable: isSupabaseConfigured,
+  };
 
   // Predefined elegant avatar colors for new accounts
   const avatarPresets = [
@@ -36,10 +65,30 @@ export default function LoginScreen() {
     { name: 'Amber', value: '#d97706' },
   ];
 
+  const handleRetryConnection = async () => {
+    setRechecking(true);
+    setError('');
+    try {
+      const status = onRetryConnection ? await onRetryConnection() : await checkSupabaseStatus(true);
+      setLocalStatus(status);
+      if (status.configured && status.reachable) {
+        setError('');
+      }
+    } finally {
+      setRechecking(false);
+    }
+  };
+
   const handleGoogleSignIn = async () => {
     setError('');
     setLoading(true);
     try {
+      const status = onRetryConnection ? await onRetryConnection() : await checkSupabaseStatus(true);
+      setLocalStatus(status);
+      if (!status.configured || !status.reachable) {
+        setError(getUnreachableMessage(status));
+        return;
+      }
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -48,7 +97,6 @@ export default function LoginScreen() {
       });
       if (error) throw error;
     } catch (err: any) {
-      console.error(err);
       setError(`Erro ao autenticar com o Google (${err.message || 'Desconhecido'}). Tente novamente.`);
     } finally {
       setLoading(false);
@@ -77,6 +125,13 @@ export default function LoginScreen() {
     setLoading(true);
 
     try {
+      const status = onRetryConnection ? await onRetryConnection() : await checkSupabaseStatus(true);
+      setLocalStatus(status);
+      if (!status.configured || !status.reachable) {
+        setError(getUnreachableMessage(status));
+        return;
+      }
+
       if (view === 'login') {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
@@ -85,7 +140,7 @@ export default function LoginScreen() {
         if (error) throw error;
       } else {
         const avatarUrl = `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(name.trim())}&backgroundColor=${avatarColor.replace('#', '')}`;
-        const { data, error } = await supabase.auth.signUp({
+        const { error } = await supabase.auth.signUp({
           email: email.trim(),
           password: password,
           options: {
@@ -103,11 +158,15 @@ export default function LoginScreen() {
         setRegistrationSuccess(true);
       }
     } catch (err: any) {
-      console.error("Supabase auth error details:", err);
       let errMsg = err.message || 'Erro no servidor de autenticação do Supabase.';
+      const lower = errMsg.toLowerCase();
       
-      if (errMsg.toLowerCase().includes('email not confirmed')) {
+      if (lower.includes('email not confirmed')) {
         errMsg = "E-mail não confirmado! Para resolver isto imediatamente, vá ao painel de controlo do seu Supabase, em Authentication > Providers > Email (clique para expandir). A opção \"Confirm email\" está no topo do formulário de Email, logo abaixo de \"Enable Email provider\" (antes das definições de SMTP). Desative-a e guarde as alterações.";
+      } else if (lower.includes('failed to fetch') || lower.includes('networkerror') || lower.includes('load failed') || lower.includes('inacessível') || lower.includes('supabase_unreachable')) {
+        errMsg = "Não foi possível contactar o servidor Supabase. Verifique a sua ligação à internet e confirme se o projeto em VITE_SUPABASE_URL está ativo e acessível.";
+      } else if (lower.includes('invalid login credentials')) {
+        errMsg = "E-mail ou palavra-passe incorretos. Verifique os seus dados e tente novamente.";
       }
       
       setError(errMsg);
@@ -134,21 +193,21 @@ export default function LoginScreen() {
               <h3 className="text-xl font-black text-slate-800 dark:text-slate-100">
                 Conta registada!
               </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed font-semibold">
-                Caso tenha a confirmação de e-mail ativa no seu Supabase, terá de clicar no link enviado para <strong className="text-[#00897b]">{email}</strong> antes de conseguir fazer login.
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-semibold">
+                Caso tenha a confirmação de e-mail ativa no seu Supabase, terá de clicar no link enviado para <strong className="text-[#00897b] dark:text-emerald-300">{email}</strong> antes de conseguir fazer login.
               </p>
             </div>
 
-            <div className="bg-slate-50 dark:bg-slate-950 text-left p-4 rounded-2xl border border-slate-150 dark:border-slate-800/80 space-y-2.5">
-              <span className="text-[10px] font-black uppercase tracking-widest text-[#00897b] dark:text-[#00897b]">Dica de Programador:</span>
-              <p className="text-[11px] text-slate-600 dark:text-slate-350 leading-relaxed font-bold">
+            <div className="bg-slate-50 dark:bg-slate-950 text-left p-4 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2.5">
+              <span className="text-[10px] font-black uppercase tracking-widest text-[#00897b] dark:text-emerald-400">Dica de Programador:</span>
+              <p className="text-[11px] text-slate-700 dark:text-slate-300 leading-relaxed font-bold">
                 Como desativar a confirmação de e-mail no Supabase (não precisa de configurar SMTP):
               </p>
-              <ul className="list-decimal list-inside text-[11px] text-slate-600 dark:text-slate-350 font-semibold space-y-1.5 mt-1 pl-1">
-                <li>Aceda ao painel em <strong className="text-slate-700 dark:text-slate-200">supabase.com</strong></li>
-                <li>Vá a <strong className="text-slate-700 dark:text-slate-200">Authentication &gt; Providers &gt; Email</strong> (clique para abrir)</li>
-                <li>No topo deste menu, verá o interruptor <strong className="text-red-500 font-bold">"Confirm email"</strong>. Fica logo abaixo de "Enable Email provider" e <strong>antes</strong> do cabeçalho de SMTP.</li>
-                <li>Desative-o e clique em <strong className="text-slate-700 dark:text-slate-200">Save</strong> no fundo do card.</li>
+              <ul className="list-decimal list-inside text-[11px] text-slate-700 dark:text-slate-300 font-semibold space-y-1.5 mt-1 pl-1">
+                <li>Aceda ao painel em <strong className="text-slate-800 dark:text-slate-100">supabase.com</strong></li>
+                <li>Vá a <strong className="text-slate-800 dark:text-slate-100">Authentication &gt; Providers &gt; Email</strong> (clique para abrir)</li>
+                <li>No topo deste menu, verá o interruptor <strong className="text-rose-600 dark:text-rose-400 font-bold">"Confirm email"</strong>. Fica logo abaixo de "Enable Email provider" e <strong>antes</strong> do cabeçalho de SMTP.</li>
+                <li>Desative-o e clique em <strong className="text-slate-800 dark:text-slate-100">Save</strong> no fundo do card.</li>
               </ul>
             </div>
 
@@ -180,7 +239,7 @@ export default function LoginScreen() {
               <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-slate-800 dark:text-slate-100">
                 {view === 'login' ? 'Iniciar Sessão' : 'Criar Conta'}
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-medium">
+              <p className="text-xs text-slate-600 dark:text-slate-300 mt-2 font-medium">
                 {view === 'login' 
                   ? 'Controle o inventário e movimentos de literatura' 
                   : 'Registe o seu utilizador para sincronização em tempo real'}
@@ -189,6 +248,24 @@ export default function LoginScreen() {
 
             {/* Auth Forms */}
             <div className="px-8 pb-8 space-y-6">
+              {(!effectiveStatus.configured || !effectiveStatus.reachable) && (
+                <div className="flex flex-col gap-2.5 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/40 rounded-2xl text-amber-800 dark:text-amber-300 text-xs font-semibold leading-relaxed">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{getUnreachableMessage(effectiveStatus)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRetryConnection}
+                    disabled={rechecking}
+                    className="self-start inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-900/30 hover:bg-amber-200/80 dark:hover:bg-amber-900/50 text-amber-900 dark:text-amber-200 text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-60"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${rechecking ? 'animate-spin' : ''}`} />
+                    {rechecking ? 'A verificar ligação...' : 'Testar ligação novamente'}
+                  </button>
+                </div>
+              )}
+
               {error && (
                 <div id="auth-error" className="flex items-start gap-3 p-4 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 rounded-2xl text-rose-600 dark:text-rose-400 text-xs font-semibold leading-relaxed animate-shake whitespace-pre-line">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -199,9 +276,9 @@ export default function LoginScreen() {
               <form id="auth-form" onSubmit={handleEmailPasswordSubmit} className="space-y-4.5">
                 {view === 'register' && (
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Nome Completo</label>
+                    <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest block">Nome Completo</label>
                     <div className="relative">
-                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500">
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-300">
                         <User className="w-4 h-4" />
                       </span>
                       <input 
@@ -209,7 +286,7 @@ export default function LoginScreen() {
                         required
                         value={name}
                         onChange={(e) => setName(e.target.value)}
-                        className="w-full pl-11 pr-5 py-3 bg-slate-50 dark:bg-slate-950/40 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-200 dark:border-slate-800 focus:border-[#00897b] dark:focus:border-emerald-500 focus:ring-2 focus:ring-[#00897b]/10 dark:focus:ring-emerald-500/10 outline-none text-xs font-bold transition-all"
+                        className="w-full pl-11 pr-5 py-3 bg-slate-50 dark:bg-slate-900/90 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-300 dark:border-slate-500 focus:border-[#00897b] dark:focus:border-emerald-400 focus:ring-2 focus:ring-[#00897b]/15 dark:focus:ring-emerald-400/20 outline-none text-xs font-bold transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400"
                         placeholder="Como deseja ser chamado"
                       />
                     </div>
@@ -217,9 +294,9 @@ export default function LoginScreen() {
                 )}
 
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Endereço de E-mail</label>
+                  <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest block">Endereço de E-mail</label>
                   <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-300">
                       <Mail className="w-4 h-4" />
                     </span>
                     <input 
@@ -227,16 +304,16 @@ export default function LoginScreen() {
                       required
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-11 pr-5 py-3 bg-slate-50 dark:bg-slate-950/40 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-200 dark:border-slate-800 focus:border-[#00897b] dark:focus:border-emerald-500 focus:ring-2 focus:ring-[#00897b]/10 dark:focus:ring-emerald-500/10 outline-none text-xs font-bold transition-all"
+                      className="w-full pl-11 pr-5 py-3 bg-slate-50 dark:bg-slate-900/90 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-300 dark:border-slate-500 focus:border-[#00897b] dark:focus:border-emerald-400 focus:ring-2 focus:ring-[#00897b]/15 dark:focus:ring-emerald-400/20 outline-none text-xs font-bold transition-all placeholder:text-slate-500 dark:placeholder:text-slate-400"
                       placeholder="Email"
                     />
                   </div>
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block">Palavra-passe</label>
+                  <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest block">Palavra-passe</label>
                   <div className="relative">
-                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500">
+                    <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-300">
                       <Lock className="w-4 h-4" />
                     </span>
                     <input 
@@ -244,13 +321,13 @@ export default function LoginScreen() {
                       required
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-11 pr-12 py-3 bg-slate-50 dark:bg-slate-950/40 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-200 dark:border-slate-800 focus:border-[#00897b] dark:focus:border-emerald-500 focus:ring-2 focus:ring-[#00897b]/10 dark:focus:ring-emerald-500/10 outline-none text-xs font-bold transition-all font-mono tracking-wider placeholder:font-sans placeholder:tracking-normal"
+                      className="w-full pl-11 pr-12 py-3 bg-slate-50 dark:bg-slate-900/90 text-slate-950 dark:text-slate-100 rounded-2xl border border-slate-300 dark:border-slate-500 focus:border-[#00897b] dark:focus:border-emerald-400 focus:ring-2 focus:ring-[#00897b]/15 dark:focus:ring-emerald-400/20 outline-none text-xs font-bold transition-all font-mono tracking-wider placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-500 dark:placeholder:text-slate-400"
                       placeholder="No mínimo 6 caracteres"
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+                      className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 dark:text-slate-300 hover:text-slate-700 dark:hover:text-slate-100 transition-colors"
                     >
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
@@ -259,8 +336,8 @@ export default function LoginScreen() {
 
                 {view === 'register' && (
                   <div className="space-y-2.5 pt-1">
-                    <label className="text-[10px] font-black text-slate-400 dark:text-slate-500 uppercase tracking-widest block flex items-center gap-1">
-                      <Camera className="w-3.5 h-3.5 text-slate-400" /> Cor Temática do Perfil
+                    <label className="text-[10px] font-black text-slate-600 dark:text-slate-300 uppercase tracking-widest block flex items-center gap-1">
+                      <Camera className="w-3.5 h-3.5 text-slate-500 dark:text-slate-300" /> Cor Temática do Perfil
                     </label>
                     <div className="flex gap-2.5">
                       {avatarPresets.map((p) => (
@@ -327,7 +404,7 @@ export default function LoginScreen() {
                     setView(view === 'login' ? 'register' : 'login');
                     setError('');
                   }}
-                  className="text-slate-500 dark:text-slate-400 hover:text-[#00897b] dark:hover:text-emerald-400 text-xs font-semibold cursor-pointer transition-colors inline-flex items-center gap-1.5 focus:outline-none"
+                  className="text-slate-600 dark:text-slate-300 hover:text-[#00897b] dark:hover:text-emerald-300 text-xs font-semibold cursor-pointer transition-colors inline-flex items-center gap-1.5 focus:outline-none"
                 >
                   {view === 'login' ? (
                     <>

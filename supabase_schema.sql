@@ -71,6 +71,31 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
+-- Função Trigger para sincronizar auth.users com public.profiles automaticamente
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, name, email, role)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.raw_user_meta_data->>'displayName', split_part(NEW.email, '@', 1)),
+    COALESCE(NEW.email, ''),
+    CASE WHEN NEW.email = 'derciojaimebalane21@gmail.com' THEN 'admin'::TEXT ELSE 'user'::TEXT END
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET name = EXCLUDED.name,
+      email = EXCLUDED.email;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger disparador automático de sincronização de perfil
+CREATE OR REPLACE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
 -- Criar índices de desempenho para consultas recorrentes rápidas
 CREATE INDEX IF NOT EXISTS books_workspace_id_idx ON public.books (workspace_id);
 CREATE INDEX IF NOT EXISTS books_loc_idx ON public.books (loc);
@@ -155,10 +180,24 @@ FOR INSERT
 TO authenticated
 WITH CHECK (auth.uid() = id);
 
-CREATE POLICY "Permitir atualização do próprio perfil"
+CREATE POLICY "Permitir atualização do próprio perfil ou por admins"
 ON public.profiles
 FOR UPDATE
 TO authenticated
-USING (auth.uid() = id)
-WITH CHECK (auth.uid() = id);
+USING (
+  auth.uid() = id OR 
+  auth.jwt() ->> 'email' = 'derciojaimebalane21@gmail.com'
+)
+WITH CHECK (
+  auth.uid() = id OR 
+  auth.jwt() ->> 'email' = 'derciojaimebalane21@gmail.com'
+);
+
+CREATE POLICY "Permitir eliminação de perfis por admins"
+ON public.profiles
+FOR DELETE
+TO authenticated
+USING (
+  auth.jwt() ->> 'email' = 'derciojaimebalane21@gmail.com'
+);
 

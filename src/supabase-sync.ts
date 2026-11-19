@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { supabase } from './supabase';
+import { useCallback, useEffect, useState } from 'react';
+import { checkSupabaseStatus, isSupabaseConfigured, supabase, SupabaseStatus } from './supabase';
 
 export interface BookItemCloud {
   id: string; // Row uuid
@@ -71,54 +71,117 @@ export function useSupabaseSync() {
   const [historyDocs, setHistoryDocs] = useState<Record<string, BookItemCloud[]>>({});
   const [syncing, setSyncing] = useState(true);
   const [loadedMonths, setLoadedMonths] = useState<Set<string>>(new Set());
+  const [supabaseStatus, setSupabaseStatus] = useState<SupabaseStatus>({
+    configured: isSupabaseConfigured,
+    reachable: isSupabaseConfigured,
+  });
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
+
+  const recheckConnection = useCallback(async () => {
+    const status = await checkSupabaseStatus(true);
+    setSupabaseStatus(status);
+    if (status.configured && status.reachable) {
+      setConnectionEpoch((prev) => prev + 1);
+    }
+    return status;
+  }, []);
 
   // 1. Listen to Auth State change utilizing Supabase
   useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        const u = session.user;
-        setUser({
-          uid: u.id,
-          email: u.email || '',
-          displayName: u.user_metadata?.full_name || u.user_metadata?.displayName || u.email?.split('@')[0] || '',
-          photoURL: u.user_metadata?.avatar_url || u.user_metadata?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(u.email || 'user')}`,
-        });
-      } else {
-        setUser(null);
-      }
+    if (!isSupabaseConfigured) {
+      setSupabaseStatus({ configured: false, reachable: false, code: 'NOT_CONFIGURED' });
+      setUser(null);
       setAuthLoading(false);
+      setSyncing(false);
+      return;
+    }
+
+    let isMounted = true;
+    let authSubscription: { unsubscribe: () => void } | null = null;
+
+    const syncProfile = async (u: any) => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+      try {
+        const name = u.user_metadata?.full_name || u.user_metadata?.displayName || u.email?.split('@')[0] || '';
+        await supabase.from('profiles').upsert({
+          id: u.id,
+          name: name,
+          email: u.email || '',
+          role: (u.email && ['derciojaimebalane21@gmail.com', 'derciojaimebalane@outlook.com'].includes(u.email.toLowerCase().trim())) ? 'admin' : 'user'
+        }, { onConflict: 'id' });
+      } catch (e) {
+        console.warn("Error syncing profile to database:", e);
+      }
+    };
+
+    const mapSupabaseUser = (u: any) => ({
+      uid: u.id,
+      email: u.email || '',
+      displayName: u.user_metadata?.full_name || u.user_metadata?.displayName || u.email?.split('@')[0] || '',
+      photoURL: u.user_metadata?.avatar_url || u.user_metadata?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(u.email || 'user')}`,
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        const u = session.user;
-        setUser({
-          uid: u.id,
-          email: u.email || '',
-          displayName: u.user_metadata?.full_name || u.user_metadata?.displayName || u.email?.split('@')[0] || '',
-          photoURL: u.user_metadata?.avatar_url || u.user_metadata?.photoURL || `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(u.email || 'user')}`,
-        });
-      } else {
-        setUser(null);
-        setBooks([]);
-        setHistoryDocs({});
-        setWorkspace({
-          id: 'global_workspace',
-          accessList: [],
-          locations: ['MANANGA PT', 'CHOTA PT'],
-          lowStockThreshold: 10
-        });
-      }
-      setAuthLoading(false);
-    });
+    (async () => {
+      const status = await checkSupabaseStatus(true);
+      if (!isMounted) return;
+      setSupabaseStatus(status);
 
-    return () => subscription.unsubscribe();
-  }, []);
+      if (!status.configured || !status.reachable) {
+        setUser(null);
+        setAuthLoading(false);
+        setSyncing(false);
+        return;
+      }
+
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) {
+          console.warn("Unable to restore Supabase session:", error.message);
+        }
+        if (!isMounted) return;
+        if (session?.user) {
+          setUser(mapSupabaseUser(session.user));
+          syncProfile(session.user);
+        } else {
+          setUser(null);
+        }
+      } catch (err) {
+        console.warn("Unexpected error initializing Supabase session:", err);
+        if (isMounted) setUser(null);
+      } finally {
+        if (isMounted) setAuthLoading(false);
+      }
+
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (!isMounted) return;
+        if (session?.user) {
+          setUser(mapSupabaseUser(session.user));
+          syncProfile(session.user);
+        } else {
+          setUser(null);
+          setBooks([]);
+          setHistoryDocs({});
+          setWorkspace({
+            id: 'global_workspace',
+            accessList: [],
+            locations: ['MANANGA PT', 'CHOTA PT'],
+            lowStockThreshold: 10
+          });
+        }
+        setAuthLoading(false);
+      });
+      authSubscription = subscription;
+    })();
+
+    return () => {
+      isMounted = false;
+      authSubscription?.unsubscribe();
+    };
+  }, [connectionEpoch]);
 
   // 2. Fetch or initialize the Workspace
   useEffect(() => {
-    if (!user) return;
+    if (!isSupabaseConfigured || !supabaseStatus.reachable || !user) return;
 
     let isMounted = true;
 
@@ -225,9 +288,32 @@ export function useSupabaseSync() {
     }
   };
 
+  const updateWorkspaceAccessList = async (accessList: any[]) => {
+    if (!user) return;
+    try {
+      const { error } = await supabase
+        .from('workspaces')
+        .update({
+          access_list: accessList,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', 'global_workspace');
+
+      if (error) throw error;
+
+      setWorkspace(prev => ({
+        ...prev,
+        accessList
+      }));
+    } catch(err) {
+      console.error(err);
+      throw err;
+    }
+  };
+
   // 3. Books synchronization
   useEffect(() => {
-    if (!user || !workspace) return;
+    if (!isSupabaseConfigured || !supabaseStatus.reachable || !user || !workspace) return;
     setSyncing(true);
 
     const fetchBooks = async () => {
@@ -269,7 +355,7 @@ export function useSupabaseSync() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [user, workspace]);
+  }, [user, workspace.id]);
 
   // 4. Monthly History and Statistics management
   const loadHistoryMonth = async (monthKey: string) => {
@@ -293,7 +379,13 @@ export function useSupabaseSync() {
       }
 
       if (data && data.snapshots) {
-        const parsed = typeof data.snapshots === 'string' ? JSON.parse(data.snapshots) : data.snapshots;
+        const parsedRaw = typeof data.snapshots === 'string' ? JSON.parse(data.snapshots) : data.snapshots;
+        const parsed = Array.isArray(parsedRaw)
+          ? parsedRaw.map((b: any, idx: number) => ({
+              ...b,
+              id: b.id || `hist-${monthKey}-${b.code || ''}-${b.loc || ''}-${idx}`
+            }))
+          : [];
         setHistoryDocs(prev => ({ ...prev, [monthKey]: parsed }));
       }
     } catch (e) {
@@ -316,11 +408,12 @@ export function useSupabaseSync() {
 
       if (fetchErr) throw fetchErr;
 
-      // Clean books snapshots
-      const snapshotsClean = monthBooks.map(b => {
+      // Clean books snapshots while preserving unique id for React list rendering
+      const snapshotsClean = monthBooks.map((b, idx) => {
         const { id, ...cleanData } = b;
         return {
           ...cleanData,
+          id: id || `hist-${monthKey}-${b.code || ''}-${b.loc || ''}-${idx}`,
           changes: typeof b.changes === 'string' ? JSON.parse(b.changes || '[]') : (b.changes ?? [])
         };
       });
@@ -378,7 +471,13 @@ export function useSupabaseSync() {
         data.forEach(row => {
           if (row.snapshots && row.month_key) {
             try {
-              const snapshotsObj = typeof row.snapshots === 'string' ? JSON.parse(row.snapshots) : row.snapshots;
+              const snapshotsRaw = typeof row.snapshots === 'string' ? JSON.parse(row.snapshots) : row.snapshots;
+              const snapshotsObj = Array.isArray(snapshotsRaw)
+                ? snapshotsRaw.map((b: any, idx: number) => ({
+                    ...b,
+                    id: b.id || `hist-${row.month_key}-${b.code || ''}-${b.loc || ''}-${idx}`
+                  }))
+                : [];
               hist[row.month_key] = snapshotsObj;
               loaded.add(row.month_key);
             } catch (err) {
@@ -574,6 +673,15 @@ export function useSupabaseSync() {
     }
   };
 
+  const updateUserDisplayName = async (newName: string) => {
+    if (!user) return;
+    const { error } = await supabase.auth.updateUser({
+      data: { full_name: newName, displayName: newName }
+    });
+    if (error) throw error;
+    setUser(prev => prev ? { ...prev, displayName: newName } : null);
+  };
+
   return {
     books,
     history: historyDocs,
@@ -590,7 +698,11 @@ export function useSupabaseSync() {
     user,
     authLoading,
     workspace,
-    updateWorkspaceSettings
+    updateWorkspaceSettings,
+    updateWorkspaceAccessList,
+    updateUserDisplayName,
+    supabaseStatus,
+    recheckConnection
   };
 }
 
